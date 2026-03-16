@@ -104,3 +104,10 @@ CLAUDE.local.md
 .pnpm-store/*
 local/
 Procfile.worktree
+
+# Local deployment configs
+ecosystem.config.cjs
+bin/start-web.sh
+bin/start-worker.sh
+initial-plan.md
+chatwoot-deployment-reference.md
