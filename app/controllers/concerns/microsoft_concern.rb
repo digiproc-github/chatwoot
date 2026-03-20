@@ -16,6 +16,6 @@ module MicrosoftConcern
   private
 
   def scope
-    'offline_access https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send openid profile email'
+    'offline_access https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send openid profile email'
   end
 end
