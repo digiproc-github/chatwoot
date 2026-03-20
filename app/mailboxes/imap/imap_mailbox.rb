@@ -90,23 +90,80 @@ class Imap::ImapMailbox
   end
 
   def find_or_create_conversation
-    @conversation = find_conversation_by_in_reply_to || find_conversation_by_reference_ids || ::Conversation.create!(
-      {
-        account_id: @account.id,
-        inbox_id: @inbox.id,
-        contact_id: @contact.id,
-        contact_inbox_id: @contact_inbox.id,
-        additional_attributes: {
-          source: 'email',
-          in_reply_to: in_reply_to,
-          auto_reply: @processed_mail.auto_reply?,
-          mail_subject: @processed_mail.subject,
-          initiated_at: {
-            timestamp: Time.now.utc
-          }
+    existing_conversation = find_conversation_by_in_reply_to || find_conversation_by_reference_ids
+
+    # Verify the sender is a known participant before merging into an existing conversation.
+    # BCC recipients share the same In-Reply-To/References headers but should get separate
+    # conversations since they were never visible participants in the thread.
+    @conversation = if existing_conversation && sender_is_conversation_participant?(existing_conversation)
+                      existing_conversation
+                    else
+                      # The matched conversation failed the participant check (e.g., BCC recipient).
+                      # Before creating a new conversation, search all thread-related conversations
+                      # for one where the sender IS a participant.
+                      find_participant_conversation_from_thread || create_new_conversation
+                    end
+  end
+
+  def find_participant_conversation_from_thread
+    thread_message_ids = (Array.wrap(@inbound_mail.references) + [in_reply_to]).compact.uniq
+    return if thread_message_ids.blank?
+
+    thread_conversations = @inbox.conversations
+                                 .joins(:messages)
+                                 .where(messages: { source_id: thread_message_ids })
+                                 .distinct
+
+    # Fast path: sender already owns a conversation in this thread
+    thread_conversations.find_by(contact_id: @contact.id) ||
+      # Slow path: sender was CC'd/To'd in another thread conversation
+      thread_conversations.detect { |c| sender_is_conversation_participant?(c) }
+  end
+
+  def create_new_conversation
+    ::Conversation.create!(
+      account_id: @account.id,
+      inbox_id: @inbox.id,
+      contact_id: @contact.id,
+      contact_inbox_id: @contact_inbox.id,
+      additional_attributes: {
+        source: 'email',
+        in_reply_to: in_reply_to,
+        auto_reply: @processed_mail.auto_reply?,
+        mail_subject: @processed_mail.subject,
+        initiated_at: {
+          timestamp: Time.now.utc
         }
       }
     )
+  end
+
+  # A sender is considered a participant if:
+  # 1. They are the conversation's original contact (same person replying), OR
+  # 2. Their email appeared in CC/To/From of any previous message (visible participant)
+  def sender_is_conversation_participant?(conversation)
+    return true if @contact.id == conversation.contact_id
+
+    sender_email = @processed_mail.original_sender&.downcase
+    return false if sender_email.blank?
+
+    conversation_has_visible_participant?(conversation, sender_email)
+  end
+
+  def conversation_has_visible_participant?(conversation, email)
+    sanitized = "%#{ActiveRecord::Base.sanitize_sql_like(email)}%"
+
+    # content_attributes is a json column with double-encoded data (JSON string containing JSON).
+    # Use #>>'{}' to extract the raw string, then ::jsonb to parse it as actual JSONB.
+    conversation.messages.where(
+      <<~SQL.squish, sanitized, sanitized, sanitized, sanitized, sanitized
+        LOWER((content_attributes#>>'{}')::jsonb->>'to_emails') LIKE ?
+        OR LOWER((content_attributes#>>'{}')::jsonb->>'cc_emails') LIKE ?
+        OR LOWER((content_attributes#>>'{}')::jsonb->>'cc_email') LIKE ?
+        OR LOWER((content_attributes#>>'{}')::jsonb->'email'->>'to') LIKE ?
+        OR LOWER((content_attributes#>>'{}')::jsonb->'email'->>'from') LIKE ?
+      SQL
+    ).exists?
   end
 
   def find_or_create_contact
