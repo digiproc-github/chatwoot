@@ -152,7 +152,10 @@ class Imap::ImapMailbox
       inbox_id: conversation.inbox_id
     )
 
-    # Private note: include the original email content for agent context
+    attach_origin_note(conversation, origin)
+  end
+
+  def attach_origin_note(conversation, origin)
     original_msg = origin.messages.incoming.order(:created_at).first
     return unless original_msg
 
@@ -160,10 +163,7 @@ class Imap::ImapMailbox
       message_type: :outgoing,
       private: true,
       content: "Original message from conversation ##{origin.display_id}:\n\n#{original_msg.content}".truncate(150_000),
-      content_attributes: {
-        originated_from_conversation_id: origin.display_id,
-        email: original_msg.content_attributes['email']
-      },
+      content_attributes: { originated_from_conversation_id: origin.display_id, email: original_msg.content_attributes['email'] },
       account_id: conversation.account_id,
       inbox_id: conversation.inbox_id,
       sender: original_msg.sender
