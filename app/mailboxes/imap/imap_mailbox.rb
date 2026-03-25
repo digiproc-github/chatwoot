@@ -101,7 +101,7 @@ class Imap::ImapMailbox
                       # The matched conversation failed the participant check (e.g., BCC recipient).
                       # Before creating a new conversation, search all thread-related conversations
                       # for one where the sender IS a participant.
-                      find_participant_conversation_from_thread || create_new_conversation
+                      find_participant_conversation_from_thread || create_new_conversation(originated_from: existing_conversation)
                     end
   end
 
@@ -120,8 +120,8 @@ class Imap::ImapMailbox
       thread_conversations.detect { |c| sender_is_conversation_participant?(c) }
   end
 
-  def create_new_conversation
-    ::Conversation.create!(
+  def create_new_conversation(originated_from: nil)
+    conversation = ::Conversation.create!(
       account_id: @account.id,
       inbox_id: @inbox.id,
       contact_id: @contact.id,
@@ -135,6 +135,38 @@ class Imap::ImapMailbox
           timestamp: Time.now.utc
         }
       }
+    )
+
+    attach_origin_context(conversation, originated_from) if originated_from.present?
+
+    conversation
+  end
+
+  def attach_origin_context(conversation, origin)
+    # Activity message: visible cross-reference in the activity timeline
+    conversation.messages.create!(
+      message_type: :activity,
+      content: "This conversation originated from conversation ##{origin.display_id}",
+      content_attributes: { originated_from_conversation_id: origin.display_id },
+      account_id: conversation.account_id,
+      inbox_id: conversation.inbox_id
+    )
+
+    # Private note: include the original email content for agent context
+    original_msg = origin.messages.incoming.order(:created_at).first
+    return unless original_msg
+
+    conversation.messages.create!(
+      message_type: :outgoing,
+      private: true,
+      content: "Original message from conversation ##{origin.display_id}:\n\n#{original_msg.content}".truncate(150_000),
+      content_attributes: {
+        originated_from_conversation_id: origin.display_id,
+        email: original_msg.content_attributes['email']
+      },
+      account_id: conversation.account_id,
+      inbox_id: conversation.inbox_id,
+      sender: original_msg.sender
     )
   end
 
