@@ -83,6 +83,8 @@ class ConversationFinder
     filter_by_status unless params[:q]
     filter_by_team
     filter_by_labels
+    filter_by_exclude_labels
+    filter_by_exclude_inboxes
     filter_by_query
     filter_by_source_id
   end
@@ -174,6 +176,21 @@ class ConversationFinder
     return unless params[:labels]
 
     @conversations = @conversations.tagged_with(params[:labels], any: true)
+  end
+
+  def filter_by_exclude_labels
+    return unless params[:exclude_labels]
+
+    excluded_conversation_ids = current_account.conversations
+                                               .tagged_with(params[:exclude_labels], any: true)
+                                               .pluck(:id)
+    @conversations = @conversations.where.not(id: excluded_conversation_ids) if excluded_conversation_ids.any?
+  end
+
+  def filter_by_exclude_inboxes
+    return unless params[:exclude_inbox_ids]
+
+    @conversations = @conversations.where.not(inbox_id: params[:exclude_inbox_ids])
   end
 
   def filter_by_source_id

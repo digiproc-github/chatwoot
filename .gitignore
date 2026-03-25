@@ -111,3 +111,4 @@ bin/start-web.sh
 bin/start-worker.sh
 initial-plan.md
 chatwoot-deployment-reference.md
+chatwoot-frontend/
