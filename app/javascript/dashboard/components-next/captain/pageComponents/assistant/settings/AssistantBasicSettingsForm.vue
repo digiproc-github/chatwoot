@@ -4,6 +4,8 @@ import { useI18n } from 'vue-i18n';
 import { useVuelidate } from '@vuelidate/core';
 import { required, minLength } from '@vuelidate/validators';
 
+import Avatar from 'dashboard/components-next/avatar/Avatar.vue';
+import Icon from 'dashboard/components-next/icon/Icon.vue';
 import Input from 'dashboard/components-next/input/Input.vue';
 import Button from 'dashboard/components-next/button/Button.vue';
 import Editor from 'dashboard/components-next/Editor/Editor.vue';
@@ -15,7 +17,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(['submit']);
+const emit = defineEmits(['submit', 'uploadAvatar', 'deleteAvatar']);
 
 const { t } = useI18n();
 
@@ -27,6 +29,7 @@ const initialState = {
     conversationFaqs: false,
     memories: false,
     citations: false,
+    contactAttributes: false,
   },
 };
 
@@ -59,6 +62,7 @@ const updateStateFromAssistant = assistant => {
     conversationFaqs: config.feature_faq || false,
     memories: config.feature_memory || false,
     citations: config.feature_citation || false,
+    contactAttributes: config.feature_contact_attributes || false,
   };
 };
 
@@ -79,23 +83,48 @@ const handleBasicInfoUpdate = async () => {
       feature_faq: state.features.conversationFaqs,
       feature_memory: state.features.memories,
       feature_citation: state.features.citations,
+      feature_contact_attributes: state.features.contactAttributes,
     },
   };
 
   emit('submit', payload);
 };
 
+// Watch the id, not the record, so saving the avatar keeps unsaved edits in the other fields.
 watch(
-  () => props.assistant,
-  newAssistant => {
-    if (newAssistant) updateStateFromAssistant(newAssistant);
-  },
+  () => props.assistant.id,
+  () => updateStateFromAssistant(props.assistant),
   { immediate: true }
 );
 </script>
 
 <template>
   <div class="flex flex-col gap-6">
+    <div class="flex flex-col gap-2">
+      <div class="flex items-center gap-1">
+        <span class="text-sm font-medium text-n-slate-12">
+          {{ t('CAPTAIN.ASSISTANTS.FORM.AVATAR.LABEL') }}
+        </span>
+        <Icon
+          v-tooltip.right="{
+            content: t('CAPTAIN.ASSISTANTS.FORM.AVATAR.HELP_TEXT'),
+            popperClass: 'max-w-80',
+          }"
+          icon="i-lucide-info"
+          class="size-3.5 text-n-slate-11"
+        />
+      </div>
+      <Avatar
+        :src="assistant.avatar_url || ''"
+        :name="assistant.name || ''"
+        :size="72"
+        icon-name="i-woot-captain"
+        allow-upload
+        @upload="emit('uploadAvatar', $event)"
+        @delete="emit('deleteAvatar')"
+      />
+    </div>
+
     <Input
       v-model="state.name"
       :label="t('CAPTAIN.ASSISTANTS.FORM.NAME.LABEL')"
@@ -114,6 +143,7 @@ watch(
 
     <Editor
       v-model="state.description"
+      :max-length="500"
       :label="t('CAPTAIN.ASSISTANTS.FORM.DESCRIPTION.LABEL')"
       :placeholder="t('CAPTAIN.ASSISTANTS.FORM.DESCRIPTION.PLACEHOLDER')"
       :message="formErrors.description"
@@ -137,6 +167,10 @@ watch(
         <label class="flex items-center gap-2">
           <input v-model="state.features.citations" type="checkbox" />
           {{ t('CAPTAIN.ASSISTANTS.FORM.FEATURES.ALLOW_CITATIONS') }}
+        </label>
+        <label class="flex items-center gap-2">
+          <input v-model="state.features.contactAttributes" type="checkbox" />
+          {{ t('CAPTAIN.ASSISTANTS.FORM.FEATURES.ALLOW_CONTACT_ATTRIBUTES') }}
         </label>
       </div>
     </div>

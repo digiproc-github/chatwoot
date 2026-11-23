@@ -1,7 +1,8 @@
 class Integrations::LlmBaseService
   include Integrations::LlmInstrumentation
+  include Llm::ExceptionTrackable
 
-  # gpt-4o-mini supports 128,000 tokens
+  # Sized for a 128,000-token context window
   # 1 token is approx 4 characters
   # sticking with 120000 to be safe
   # 120000 * 4 = 480,000 characters (rounding off downwards to 400,000 to be safe)
@@ -100,13 +101,14 @@ class Integrations::LlmBaseService
   def execute_ruby_llm_request(parsed_body)
     messages = parsed_body['messages']
     model = parsed_body['model']
+    credential = llm_credential
 
-    Llm::Config.with_api_key(hook.settings['api_key'], api_base: api_base) do |context|
+    Llm::Config.with_api_key(credential[:api_key], api_base: api_base) do |context|
       chat = context.chat(model: model)
       setup_chat_with_messages(chat, messages)
     end
   rescue StandardError => e
-    ChatwootExceptionTracker.new(e, account: hook.account).capture_exception
+    capture_llm_exception(e, credential: credential)
     build_error_response_from_exception(e, messages)
   end
 
@@ -144,9 +146,9 @@ class Integrations::LlmBaseService
     {
       message: response.content,
       usage: {
-        'prompt_tokens' => response.input_tokens,
-        'completion_tokens' => response.output_tokens,
-        'total_tokens' => (response.input_tokens || 0) + (response.output_tokens || 0)
+        'prompt_tokens' => response.tokens.input,
+        'completion_tokens' => response.tokens.output,
+        'total_tokens' => (response.tokens.input || 0) + (response.tokens.output || 0)
       },
       request_messages: messages
     }
@@ -162,6 +164,14 @@ class Integrations::LlmBaseService
       messages: parsed_body['messages'],
       temperature: parsed_body['temperature']
     }
+  end
+
+  def llm_credential
+    @llm_credential ||= { api_key: hook.settings['api_key'], source: :hook }
+  end
+
+  def exception_tracking_account
+    hook.account
   end
 
   def build_error_response_from_exception(error, messages)

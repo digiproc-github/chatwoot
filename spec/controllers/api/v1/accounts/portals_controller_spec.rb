@@ -68,6 +68,23 @@ RSpec.describe 'Api::V1::Accounts::Portals', type: :request do
         expect(json_response['meta']['all_articles_count']).to eq 2
         expect(json_response['meta']['mine_articles_count']).to eq 1
       end
+
+      it 'returns not found for a slug that does not exist' do
+        get "/api/v1/accounts/#{account.id}/portals/nonexistent-slug",
+            headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:not_found)
+        expect(response.parsed_body['error']).to eq 'Resource could not be found'
+      end
+
+      it 'returns not found for a slug that belongs to another account' do
+        other_portal = create(:portal)
+
+        get "/api/v1/accounts/#{account.id}/portals/#{other_portal.slug}",
+            headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:not_found)
+      end
     end
   end
 
@@ -100,6 +117,41 @@ RSpec.describe 'Api::V1::Accounts::Portals', type: :request do
         expect(json_response['name']).to eql('test_portal')
         expect(json_response['custom_domain']).to eql('support.chatwoot.dev')
       end
+
+      it 'creates portal when custom_domain is omitted from request body' do
+        portal_params = {
+          portal: {
+            name: 'test_portal_no_domain',
+            slug: 'test_kbase_no_domain'
+          }
+        }
+        post "/api/v1/accounts/#{account.id}/portals",
+             params: portal_params,
+             headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:success)
+        json_response = response.parsed_body
+        expect(json_response['name']).to eql('test_portal_no_domain')
+        expect(json_response['custom_domain']).to be_nil
+      end
+
+      it 'creates portal when custom_domain is blank' do
+        portal_params = {
+          portal: {
+            name: 'test_portal_blank_domain',
+            slug: 'test_kbase_blank_domain',
+            custom_domain: ''
+          }
+        }
+        post "/api/v1/accounts/#{account.id}/portals",
+             params: portal_params,
+             headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:success)
+        json_response = response.parsed_body
+        expect(json_response['name']).to eql('test_portal_blank_domain')
+        expect(json_response['custom_domain']).to be_blank
+      end
     end
   end
 
@@ -117,7 +169,7 @@ RSpec.describe 'Api::V1::Accounts::Portals', type: :request do
         portal_params = {
           portal: {
             name: 'updated_test_portal',
-            config: { 'allowed_locales' => %w[en es] }
+            config: { 'allowed_locales' => %w[en es], 'draft_locales' => ['es'], 'default_locale' => 'en' }
           }
         }
 
@@ -130,8 +182,49 @@ RSpec.describe 'Api::V1::Accounts::Portals', type: :request do
         expect(response).to have_http_status(:success)
         json_response = response.parsed_body
         expect(json_response['name']).to eql(portal_params[:portal][:name])
-        expect(json_response['config']).to eql({ 'allowed_locales' => [{ 'articles_count' => 0, 'categories_count' => 0, 'code' => 'en' },
-                                                                       { 'articles_count' => 0, 'categories_count' => 0, 'code' => 'es' }] })
+        expect(json_response['config']).to eql(
+          {
+            'allowed_locales' => [
+              { 'articles_count' => 0, 'categories_count' => 0, 'code' => 'en', 'draft' => false },
+              { 'articles_count' => 0, 'categories_count' => 0, 'code' => 'es', 'draft' => true }
+            ],
+            'default_locale' => 'en',
+            'layout' => 'classic',
+            'social_profiles' => {},
+            'locale_translations' => {},
+            'popular_content' => {},
+            'analytics' => {},
+            'disable_search_indexing' => false
+          }
+        )
+      end
+
+      it 'allows administrators to set analytics config' do
+        put "/api/v1/accounts/#{account.id}/portals/#{portal.slug}",
+            params: { portal: { config: { analytics: { ga4_measurement_id: 'G-ADMIN12345' } } } },
+            headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:success)
+        expect(portal.reload.config['analytics']).to eq('ga4_measurement_id' => 'G-ADMIN12345')
+      end
+
+      it 'preserves drafted locales when draft_locales is omitted' do
+        portal.update!(config: { allowed_locales: %w[en es fr], draft_locales: ['es'], default_locale: 'en' })
+
+        put "/api/v1/accounts/#{account.id}/portals/#{portal.slug}",
+            params: {
+              portal: {
+                config: { allowed_locales: %w[en es fr], default_locale: 'en' }
+              }
+            },
+            headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:success)
+        portal.reload
+        expect(portal.draft_locale_codes).to eq(['es'])
+        expect(response.parsed_body.dig('config', 'allowed_locales')).to include(
+          a_hash_including('code' => 'es', 'draft' => true)
+        )
       end
 
       it 'archive portal' do
@@ -153,6 +246,46 @@ RSpec.describe 'Api::V1::Accounts::Portals', type: :request do
 
         portal.reload
         expect(portal.archived).to be_truthy
+      end
+
+      it 'does not raise when blob_id is an integer (existing logo re-sent by frontend)' do
+        portal.logo.attach(io: Rails.root.join('spec/assets/avatar.png').open, filename: 'avatar.png', content_type: 'image/png')
+
+        put "/api/v1/accounts/#{account.id}/portals/#{portal.slug}",
+            params: { portal: { name: 'updated_name' }, blob_id: portal.logo.blob.id },
+            headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:success)
+        expect(response.parsed_body['name']).to eq('updated_name')
+        expect(portal.reload.logo).to be_attached
+      end
+
+      it 'attaches the dark mode logo from dark_logo_blob_id' do
+        blob = ActiveStorage::Blob.create_and_upload!(io: Rails.root.join('spec/assets/avatar.png').open, filename: 'avatar.png',
+                                                      content_type: 'image/png')
+
+        put "/api/v1/accounts/#{account.id}/portals/#{portal.slug}",
+            params: { portal: { name: portal.name }, dark_logo_blob_id: blob.signed_id },
+            headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:success)
+        expect(response.parsed_body['dark_logo']['blob_id']).to eq(blob.signed_id)
+        expect(portal.reload.logo).not_to be_attached
+      end
+
+      it 'does not allow associating an inbox from another account' do
+        other_account = create(:account)
+        foreign_inbox = create(:inbox, account: other_account)
+
+        put "/api/v1/accounts/#{account.id}/portals/#{portal.slug}",
+            params: {
+              portal: { name: portal.name },
+              inbox_id: foreign_inbox.id
+            },
+            headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:not_found)
+        expect(portal.reload.channel_web_widget_id).to be_nil
       end
 
       it 'clears associated web widget when inbox selection is blank' do
@@ -227,6 +360,84 @@ RSpec.describe 'Api::V1::Accounts::Portals', type: :request do
         expect { portal.logo.attachment.reload }.to raise_error(ActiveRecord::RecordNotFound)
         expect(response).to have_http_status(:success)
       end
+
+      it 'deletes only the dark mode logo when dark is true' do
+        portal.dark_logo.attach(io: Rails.root.join('spec/assets/avatar.png').open, filename: 'avatar.png', content_type: 'image/png')
+
+        delete "/api/v1/accounts/#{account.id}/portals/#{portal.slug}/logo",
+               params: { dark: true },
+               headers: admin.create_new_auth_token,
+               as: :json
+
+        expect(response).to have_http_status(:success)
+        expect(portal.reload.dark_logo).not_to be_attached
+        expect(portal.logo).to be_attached
+      end
+    end
+  end
+
+  describe 'DELETE /api/v1/accounts/{account.id}/portals/{portal.slug}/remove_locale' do
+    let!(:portal) { create(:portal, slug: 'portal-locales', account_id: account.id, config: { allowed_locales: %w[en es], default_locale: 'en' }) }
+
+    context 'when it is an unauthenticated user' do
+      it 'returns unauthorized' do
+        delete "/api/v1/accounts/#{account.id}/portals/#{portal.slug}/remove_locale", params: { locale: 'es' }
+
+        expect(response).to have_http_status(:unauthorized)
+      end
+    end
+
+    context 'when it is an authenticated user' do
+      it 'throws error if agent' do
+        delete "/api/v1/accounts/#{account.id}/portals/#{portal.slug}/remove_locale",
+               params: { locale: 'es' },
+               headers: agent.create_new_auth_token,
+               as: :json
+
+        expect(response).to have_http_status(:unauthorized)
+      end
+
+      it 'removes the locale with its articles and categories' do
+        es_category = create(:category, portal: portal, locale: 'es', slug: 'es-category')
+        es_article = create(:article, portal: portal, account: account, category: es_category, locale: 'es')
+        es_uncategorized_article = create(:article, portal: portal, account: account, locale: 'es')
+        en_article = create(:article, portal: portal, account: account, locale: 'en')
+
+        delete "/api/v1/accounts/#{account.id}/portals/#{portal.slug}/remove_locale",
+               params: { locale: 'es' },
+               headers: admin.create_new_auth_token,
+               as: :json
+
+        expect(response).to have_http_status(:success)
+        expect(response.parsed_body['config']['allowed_locales'].pluck('code')).to eq(%w[en])
+        expect(portal.reload.allowed_locale_codes).to eq(%w[en])
+        expect(Article.where(id: [es_article.id, es_uncategorized_article.id])).to be_empty
+        expect(Category.where(id: es_category.id)).to be_empty
+        expect(portal.articles).to contain_exactly(en_article)
+      end
+
+      it 'does not remove the default locale' do
+        delete "/api/v1/accounts/#{account.id}/portals/#{portal.slug}/remove_locale",
+               params: { locale: 'en' },
+               headers: admin.create_new_auth_token,
+               as: :json
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(portal.reload.allowed_locale_codes).to eq(%w[en es])
+      end
+
+      it 'rejects a list of locales' do
+        en_article = create(:article, portal: portal, account: account, locale: 'en')
+        es_article = create(:article, portal: portal, account: account, locale: 'es')
+
+        delete "/api/v1/accounts/#{account.id}/portals/#{portal.slug}/remove_locale",
+               params: { locale: %w[en es] },
+               headers: admin.create_new_auth_token,
+               as: :json
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(portal.articles).to contain_exactly(en_article, es_article)
+      end
     end
   end
 
@@ -299,6 +510,27 @@ RSpec.describe 'Api::V1::Accounts::Portals', type: :request do
         expect(PortalInstructionsMailer).to have_received(:send_cname_instructions)
           .with(portal: portal_with_domain, recipient_email: 'dev@example.com')
       end
+    end
+  end
+
+  describe 'config.disable_search_indexing' do
+    let(:portal_url) { "/api/v1/accounts/#{account.id}/portals/#{portal.slug}" }
+
+    it 'hides the portal from search engines' do
+      put portal_url, params: { portal: { config: { disable_search_indexing: true } } },
+                      headers: admin.create_new_auth_token, as: :json
+
+      expect(response).to have_http_status(:success)
+      expect(response.parsed_body.dig('config', 'disable_search_indexing')).to be(true)
+      expect(portal.reload.search_indexing_disabled?).to be(true)
+    end
+
+    it 'rejects a non-boolean value' do
+      put portal_url, params: { portal: { config: { disable_search_indexing: 'true' } } },
+                      headers: admin.create_new_auth_token, as: :json
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(portal.reload.search_indexing_disabled?).to be(false)
     end
   end
 end

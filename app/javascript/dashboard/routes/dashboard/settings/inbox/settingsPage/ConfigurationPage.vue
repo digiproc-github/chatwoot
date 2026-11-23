@@ -1,24 +1,35 @@
 <script>
+import { mapGetters } from 'vuex';
 import { useAlert } from 'dashboard/composables';
+import { useWhatsappEmbeddedSignup } from 'dashboard/composables/useWhatsappEmbeddedSignup';
+import whatsappChannel from 'dashboard/api/channel/whatsappChannel';
 import inboxMixin from 'shared/mixins/inboxMixin';
 import SettingsFieldSection from 'dashboard/components-next/Settings/SettingsFieldSection.vue';
+import SettingsToggleSection from 'dashboard/components-next/Settings/SettingsToggleSection.vue';
+import SettingsAccordion from 'dashboard/components-next/Settings/SettingsAccordion.vue';
 import ImapSettings from '../ImapSettings.vue';
 import SmtpSettings from '../SmtpSettings.vue';
 import { useVuelidate } from '@vuelidate/core';
 import { required } from '@vuelidate/validators';
 import NextButton from 'dashboard/components-next/button/Button.vue';
+import Banner from 'dashboard/components-next/banner/Banner.vue';
 import TextArea from 'next/textarea/TextArea.vue';
-import WhatsappReauthorize from '../channels/whatsapp/Reauthorize.vue';
 import { sanitizeAllowedDomains } from 'dashboard/helper/URLHelper';
+import WhatsappBusinessManagementToken from './WhatsappBusinessManagementToken.vue';
+import HmacSecretKey from './components/HmacSecretKey.vue';
 
 export default {
   components: {
     SettingsFieldSection,
+    SettingsToggleSection,
+    SettingsAccordion,
     ImapSettings,
     SmtpSettings,
     NextButton,
+    Banner,
     TextArea,
-    WhatsappReauthorize,
+    WhatsappBusinessManagementToken,
+    HmacSecretKey,
   },
   mixins: [inboxMixin],
   props: {
@@ -28,27 +39,44 @@ export default {
     },
   },
   setup() {
-    return { v$: useVuelidate() };
+    const { runEmbeddedSignup } = useWhatsappEmbeddedSignup();
+    return { v$: useVuelidate(), runEmbeddedSignup };
   },
   data() {
     return {
       hmacMandatory: false,
+      allowMobileWebview: false,
       whatsAppInboxAPIKey: '',
-      isRequestingReauthorization: false,
+      whatsAppAppSecret: '',
       isSyncingTemplates: false,
       allowedDomains: '',
       isUpdatingAllowedDomains: false,
+      isSettingDefaults: false,
+      isReconfiguring: false,
     };
   },
   validations: {
     whatsAppInboxAPIKey: { required },
+    whatsAppAppSecret: { required },
   },
   computed: {
+    ...mapGetters({
+      isOnChatwootCloud: 'globalConfig/isOnChatwootCloud',
+    }),
     isEmbeddedSignupWhatsApp() {
       return this.inbox.provider_config?.source === 'embedded_signup';
     },
-    whatsappAppId() {
-      return window.chatwootConfig?.whatsappAppId;
+    isManualWhatsAppCloud() {
+      return (
+        this.inbox.provider === 'whatsapp_cloud' &&
+        !this.isEmbeddedSignupWhatsApp
+      );
+    },
+    isWhatsAppAppSecretMissing() {
+      return !this.inbox.provider_config?.app_secret;
+    },
+    showWhatsAppReconfigure() {
+      return this.isEmbeddedSignupWhatsApp;
     },
     isForwardingEnabled() {
       return !!this.inbox.forwarding_enabled;
@@ -58,14 +86,28 @@ export default {
     inbox() {
       this.setDefaults();
     },
+    allowMobileWebview() {
+      if (!this.isSettingDefaults) this.handleMobileWebviewFlag();
+    },
+    hmacMandatory() {
+      if (!this.isSettingDefaults && this.isAWebWidgetInbox)
+        this.handleHmacFlag();
+    },
   },
   mounted() {
     this.setDefaults();
   },
   methods: {
     setDefaults() {
+      this.isSettingDefaults = true;
       this.hmacMandatory = this.inbox.hmac_mandatory || false;
+      this.allowMobileWebview = (
+        this.inbox.selected_feature_flags || []
+      ).includes('allow_mobile_webview');
       this.allowedDomains = this.inbox.allowed_domains || '';
+      this.$nextTick(() => {
+        this.isSettingDefaults = false;
+      });
     },
     handleHmacFlag() {
       this.updateInbox();
@@ -77,6 +119,26 @@ export default {
           formData: false,
           channel: {
             hmac_mandatory: this.hmacMandatory,
+          },
+        };
+        await this.$store.dispatch('inboxes/updateInbox', payload);
+        useAlert(this.$t('INBOX_MGMT.EDIT.API.SUCCESS_MESSAGE'));
+      } catch (error) {
+        useAlert(this.$t('INBOX_MGMT.EDIT.API.ERROR_MESSAGE'));
+      }
+    },
+    async handleMobileWebviewFlag() {
+      try {
+        const currentFlags = this.inbox.selected_feature_flags || [];
+        const selectedFlags = this.allowMobileWebview
+          ? [...currentFlags, 'allow_mobile_webview']
+          : currentFlags.filter(f => f !== 'allow_mobile_webview');
+
+        const payload = {
+          id: this.inbox.id,
+          formData: false,
+          channel: {
+            selected_feature_flags: selectedFlags,
           },
         };
         await this.$store.dispatch('inboxes/updateInbox', payload);
@@ -126,9 +188,46 @@ export default {
         useAlert(this.$t('INBOX_MGMT.EDIT.API.ERROR_MESSAGE'));
       }
     },
-    async handleReconfigure() {
-      if (this.$refs.whatsappReauth) {
-        await this.$refs.whatsappReauth.requestAuthorization();
+    async updateWhatsAppAppSecret() {
+      try {
+        const payload = {
+          id: this.inbox.id,
+          formData: false,
+          channel: {
+            provider_config: {
+              ...this.inbox.provider_config,
+              app_secret: this.whatsAppAppSecret,
+            },
+          },
+        };
+
+        await this.$store.dispatch('inboxes/updateInbox', payload);
+        this.whatsAppAppSecret = '';
+        useAlert(this.$t('INBOX_MGMT.EDIT.API.SUCCESS_MESSAGE'));
+      } catch (error) {
+        useAlert(this.$t('INBOX_MGMT.EDIT.API.ERROR_MESSAGE'));
+      }
+    },
+    async reconfigureWhatsApp() {
+      this.isReconfiguring = true;
+      try {
+        const credentials = await this.runEmbeddedSignup();
+        // User dismissed the Meta popup without completing signup.
+        if (!credentials) return;
+
+        await whatsappChannel.reauthorizeWhatsApp({
+          inboxId: this.inbox.id,
+          ...credentials,
+        });
+        useAlert(
+          this.$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_RECONFIGURE_SUCCESS')
+        );
+      } catch (error) {
+        useAlert(
+          this.$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_RECONFIGURE_ERROR')
+        );
+      } finally {
+        this.isReconfiguring = false;
       }
     },
     async syncTemplates() {
@@ -168,24 +267,6 @@ export default {
       </NextButton>
     </SettingsFieldSection>
   </div>
-  <div v-else-if="isAVoiceChannel">
-    <SettingsFieldSection
-      :label="$t('INBOX_MGMT.ADD.VOICE.CONFIGURATION.TWILIO_VOICE_URL_TITLE')"
-      :help-text="
-        $t('INBOX_MGMT.ADD.VOICE.CONFIGURATION.TWILIO_VOICE_URL_SUBTITLE')
-      "
-    >
-      <woot-code :script="inbox.voice_call_webhook_url" lang="html" />
-    </SettingsFieldSection>
-    <SettingsFieldSection
-      :label="$t('INBOX_MGMT.ADD.VOICE.CONFIGURATION.TWILIO_STATUS_URL_TITLE')"
-      :help-text="
-        $t('INBOX_MGMT.ADD.VOICE.CONFIGURATION.TWILIO_STATUS_URL_SUBTITLE')
-      "
-    >
-      <woot-code :script="inbox.voice_status_webhook_url" lang="html" />
-    </SettingsFieldSection>
-  </div>
 
   <div v-else-if="isALineChannel">
     <SettingsFieldSection
@@ -196,75 +277,86 @@ export default {
     </SettingsFieldSection>
   </div>
   <div v-else-if="isAWebWidgetInbox">
-    <div>
-      <SettingsFieldSection
-        :label="$t('INBOX_MGMT.SETTINGS_POPUP.ALLOWED_DOMAINS.TITLE')"
-        :help-text="$t('INBOX_MGMT.SETTINGS_POPUP.ALLOWED_DOMAINS.SUBTITLE')"
-        class="[&>div]:!items-start"
+    <div class="space-y-4">
+      <SettingsToggleSection
+        :header="$t('INBOX_MGMT.SETTINGS_POPUP.ALLOWED_DOMAINS.TITLE')"
+        :description="
+          $t('INBOX_MGMT.SETTINGS_POPUP.ALLOWED_DOMAINS.DESCRIPTION')
+        "
+        hide-toggle
       >
-        <TextArea
-          v-model="allowedDomains"
-          :placeholder="
-            $t('INBOX_MGMT.SETTINGS_POPUP.ALLOWED_DOMAINS.PLACEHOLDER')
-          "
-          auto-height
-          min-height="8rem"
-          class="w-full"
-        />
-        <template #extra>
-          <div class="grid grid-cols-1 lg:grid-cols-8">
-            <div class="col-span-1 lg:col-span-2 invisible" />
-            <div class="col-span-1 lg:col-span-6 mt-4 justify-self-end">
-              <NextButton
-                :label="$t('INBOX_MGMT.SETTINGS_POPUP.UPDATE')"
-                :is-loading="isUpdatingAllowedDomains"
-                @click="updateAllowedDomains"
-              />
-            </div>
-          </div>
-        </template>
-      </SettingsFieldSection>
-
-      <SettingsFieldSection
-        :label="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_VERIFICATION')"
-      >
-        <woot-code :script="inbox.hmac_token" />
-        <template #extra>
-          <div class="grid grid-cols-1 lg:grid-cols-8">
-            <div class="col-span-1 lg:col-span-2 invisible" />
-            <p
-              class="col-span-1 lg:col-span-6 mt-1.5 text-label-small text-n-slate-11 ltr:ml-1 rtl:mr-1"
-            >
-              {{ $t('INBOX_MGMT.SETTINGS_POPUP.HMAC_DESCRIPTION') }}
-              <a
-                target="_blank"
-                rel="noopener noreferrer"
-                href="https://www.chatwoot.com/docs/product/channels/live-chat/sdk/identity-validation/"
-                class="text-n-blue-11 hover:underline text-label-small"
-              >
-                {{ $t('INBOX_MGMT.SETTINGS_POPUP.HMAC_LINK_TO_DOCS') }}
-              </a>
-            </p>
-          </div>
-        </template>
-      </SettingsFieldSection>
-      <SettingsFieldSection
-        :label="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_MANDATORY_VERIFICATION')"
-        :help-text="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_MANDATORY_DESCRIPTION')"
-      >
-        <div class="flex gap-2 items-center">
-          <input
-            id="hmacMandatory"
-            v-model="hmacMandatory"
-            type="checkbox"
-            @change="handleHmacFlag"
+        <template #editor>
+          <TextArea
+            v-model="allowedDomains"
+            :placeholder="
+              $t('INBOX_MGMT.SETTINGS_POPUP.ALLOWED_DOMAINS.PLACEHOLDER')
+            "
+            auto-height
+            resize
+            class="w-full [&>div]:!bg-transparent [&>div]:!border-none [&>div]:!border-0 [&>div]:px-0 [&>div]:pb-0 [&>div]:pt-0"
           />
-          <label for="hmacMandatory" class="text-body-main text-n-slate-12">
-            {{ $t('INBOX_MGMT.EDIT.ENABLE_HMAC.LABEL') }}
-          </label>
-        </div>
-      </SettingsFieldSection>
+          <div class="mt-3 flex justify-end">
+            <NextButton
+              :label="$t('INBOX_MGMT.SETTINGS_POPUP.UPDATE')"
+              :is-loading="isUpdatingAllowedDomains"
+              @click="updateAllowedDomains"
+            />
+          </div>
+        </template>
+      </SettingsToggleSection>
+      <SettingsToggleSection
+        v-model="allowMobileWebview"
+        :header="$t('INBOX_MGMT.SETTINGS_POPUP.ALLOW_MOBILE_WEBVIEW.LABEL')"
+        :description="
+          $t('INBOX_MGMT.SETTINGS_POPUP.ALLOW_MOBILE_WEBVIEW.SUBTITLE')
+        "
+      />
     </div>
+
+    <SettingsAccordion
+      :title="$t('INBOX_MGMT.SETTINGS_POPUP.IDENTITY_VALIDATION.TITLE')"
+      class="mt-6"
+    >
+      <SettingsToggleSection
+        :header="$t('INBOX_MGMT.SETTINGS_POPUP.IDENTITY_VALIDATION.TITLE')"
+        :description="
+          $t('INBOX_MGMT.SETTINGS_POPUP.IDENTITY_VALIDATION.DESCRIPTION')
+        "
+        hide-toggle
+      >
+        <template #editor>
+          <p class="mb-1 text-sm font-medium text-n-slate-12">
+            {{ $t('INBOX_MGMT.SETTINGS_POPUP.IDENTITY_VALIDATION.SECRET_KEY') }}
+          </p>
+          <HmacSecretKey :inbox="inbox" />
+          <p class="mt-1.5 text-label-small text-n-slate-11">
+            {{ $t('INBOX_MGMT.SETTINGS_POPUP.HMAC_DESCRIPTION') }}
+            <a
+              target="_blank"
+              rel="noopener noreferrer"
+              href="https://www.chatwoot.com/docs/product/channels/live-chat/sdk/identity-validation/"
+              class="text-n-blue-11 hover:underline text-label-small"
+            >
+              {{
+                $t('INBOX_MGMT.SETTINGS_POPUP.IDENTITY_VALIDATION.VIEW_DOCS')
+              }}
+            </a>
+          </p>
+        </template>
+      </SettingsToggleSection>
+
+      <SettingsToggleSection
+        v-model="hmacMandatory"
+        :header="
+          $t('INBOX_MGMT.SETTINGS_POPUP.IDENTITY_VALIDATION.REQUIRE_LABEL')
+        "
+        :description="
+          $t(
+            'INBOX_MGMT.SETTINGS_POPUP.IDENTITY_VALIDATION.REQUIRE_DESCRIPTION'
+          )
+        "
+      />
+    </SettingsAccordion>
   </div>
   <div v-else-if="isAPIInbox">
     <SettingsFieldSection
@@ -278,7 +370,7 @@ export default {
       :label="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_VERIFICATION')"
       :help-text="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_DESCRIPTION')"
     >
-      <woot-code :script="inbox.hmac_token" />
+      <HmacSecretKey :inbox="inbox" />
     </SettingsFieldSection>
     <SettingsFieldSection
       :label="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_MANDATORY_VERIFICATION')"
@@ -322,29 +414,41 @@ export default {
       </SettingsFieldSection>
     </div>
     <ImapSettings :inbox="inbox" />
-    <SmtpSettings v-if="inbox.imap_enabled" :inbox="inbox" />
+    <SmtpSettings :inbox="inbox" />
   </div>
   <div v-else-if="isAWhatsAppChannel && !isATwilioChannel">
     <div v-if="inbox.provider_config">
       <!-- Embedded Signup Section -->
       <template v-if="isEmbeddedSignupWhatsApp">
         <SettingsFieldSection
-          v-if="whatsappAppId"
+          :label="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_WEBHOOK_TITLE')"
+          :help-text="
+            $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_WEBHOOK_SUBHEADER')
+          "
+        >
+          <woot-code :script="inbox.provider_config.webhook_verify_token" />
+        </SettingsFieldSection>
+        <SettingsFieldSection
+          v-if="showWhatsAppReconfigure"
           :label="
             $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_EMBEDDED_SIGNUP_TITLE')
           "
-          :help-text="`${$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_EMBEDDED_SIGNUP_SUBHEADER')} ${$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_EMBEDDED_SIGNUP_DESCRIPTION')}`"
+          :help-text="
+            $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_EMBEDDED_SIGNUP_DESCRIPTION')
+          "
         >
-          <div class="flex flex-col gap-1 items-start">
-            <NextButton @click="handleReconfigure">
-              {{ $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_RECONFIGURE_BUTTON') }}
-            </NextButton>
-          </div>
+          <NextButton
+            :is-loading="isReconfiguring"
+            :disabled="isReconfiguring"
+            @click="reconfigureWhatsApp"
+          >
+            {{ $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_RECONFIGURE_BUTTON') }}
+          </NextButton>
         </SettingsFieldSection>
       </template>
 
       <!-- Manual Setup Section -->
-      <template v-else>
+      <template v-else-if="!isEmbeddedSignupWhatsApp">
         <SettingsFieldSection
           :label="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_WEBHOOK_TITLE')"
           :help-text="
@@ -390,7 +494,47 @@ export default {
             </NextButton>
           </div>
         </SettingsFieldSection>
+        <SettingsFieldSection
+          v-if="isManualWhatsAppCloud"
+          :label="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_APP_SECRET_TITLE')"
+          :help-text="
+            $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_APP_SECRET_SUBHEADER')
+          "
+        >
+          <Banner v-if="isWhatsAppAppSecretMissing" color="amber" class="mb-3">
+            {{ $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_APP_SECRET_MISSING') }}
+          </Banner>
+          <div
+            class="flex flex-1 justify-between items-center whatsapp-settings--content"
+          >
+            <woot-input
+              v-model="whatsAppAppSecret"
+              type="password"
+              autocomplete="off"
+              class="flex-1 mr-2 [&>input]:!mb-0"
+              :placeholder="
+                $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_APP_SECRET_PLACEHOLDER')
+              "
+            />
+            <NextButton
+              :disabled="v$.whatsAppAppSecret.$invalid"
+              @click="updateWhatsAppAppSecret"
+            >
+              {{
+                $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_SECTION_UPDATE_BUTTON')
+              }}
+            </NextButton>
+          </div>
+        </SettingsFieldSection>
       </template>
+      <WhatsappBusinessManagementToken
+        v-if="
+          isOnChatwootCloud &&
+          inbox.provider === 'whatsapp_cloud' &&
+          isEmbeddedSignupWhatsApp
+        "
+        :inbox="inbox"
+      />
       <SettingsFieldSection
         :label="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_TEMPLATES_SYNC_TITLE')"
         :help-text="
@@ -402,18 +546,12 @@ export default {
         </NextButton>
       </SettingsFieldSection>
     </div>
-    <WhatsappReauthorize
-      v-if="isEmbeddedSignupWhatsApp"
-      ref="whatsappReauth"
-      :inbox="inbox"
-      class="hidden"
-    />
   </div>
 </template>
 
 <style lang="scss" scoped>
 .whatsapp-settings--content {
-  ::v-deep input {
+  :deep(input) {
     margin-bottom: 0;
   }
 }

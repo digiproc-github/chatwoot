@@ -2,7 +2,7 @@ class Conversations::EventDataPresenter < SimpleDelegator
   def push_data
     {
       additional_attributes: additional_attributes,
-      can_reply: can_reply?,
+      **push_reply_state,
       channel: inbox.try(:channel_type),
       contact_inbox: contact_inbox,
       id: display_id,
@@ -21,10 +21,39 @@ class Conversations::EventDataPresenter < SimpleDelegator
     }
   end
 
+  # Like #push_data but with message text normalized for external integrations (webhooks).
+  def webhook_data
+    push_data.merge(
+      account: account.webhook_data,
+      messages: webhook_push_messages
+    )
+  end
+
+  # The widget learns the conversation's id, inbox, read state and status, not the contact or the agents
+  def widget_data
+    {
+      id: display_id,
+      inbox_id: inbox_id,
+      contact_last_seen_at: contact_last_seen_at.to_i,
+      status: status
+    }
+  end
+
   private
 
   def push_messages
     [messages.where(account_id: account_id).chat.last&.push_event_data].compact
+  end
+
+  def webhook_push_messages
+    [messages.where(account_id: account_id).chat.last&.webhook_push_event_data].compact
+  end
+
+  def push_reply_state
+    {
+      anonymous_caller: contact_inbox&.anonymous_caller?,
+      can_reply: can_reply?
+    }
   end
 
   def push_meta

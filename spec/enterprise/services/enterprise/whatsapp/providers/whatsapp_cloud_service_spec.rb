@@ -1,0 +1,122 @@
+require 'rails_helper'
+
+describe Whatsapp::Providers::WhatsappCloudService do
+  subject(:service) { described_class.new(whatsapp_channel: whatsapp_channel) }
+
+  let(:whatsapp_channel) { create(:channel_whatsapp, provider: 'whatsapp_cloud', validate_provider_config: false, sync_templates: false) }
+  # Call-flow endpoints use the configured WHATSAPP_API_VERSION (fallback v22.0),
+  # not the OSS v13.0 path locked for legacy /messages compatibility.
+  let(:calls_url) { 'https://graph.facebook.com/v22.0/123456789/calls' }
+  let(:messages_url) { 'https://graph.facebook.com/v22.0/123456789/messages' }
+  let(:headers) { { 'Content-Type' => 'application/json' } }
+
+  before { stub_request(:get, /message_templates/) }
+
+  describe 'call action methods' do
+    it 'POSTs the action body with the SDP answer and returns true on success' do
+      stub_request(:post, calls_url)
+        .with(body: { messaging_product: 'whatsapp', call_id: 'WACALL', action: 'pre_accept',
+                      session: { sdp: 'sdp_answer', sdp_type: 'answer' } }.to_json)
+        .to_return(status: 200, body: '{}', headers: headers)
+
+      expect(service.pre_accept_call('WACALL', 'sdp_answer')).to be true
+    end
+
+    it 'returns false when Meta responds with a non-success status' do
+      stub_request(:post, calls_url).to_return(status: 400, body: '{}', headers: headers)
+
+      expect(service.reject_call('WACALL')).to be false
+    end
+  end
+
+  describe 'calling settings' do
+    let(:settings_url) { 'https://graph.facebook.com/v22.0/123456789/settings' }
+
+    it 'bounds reading and updating the settings, so saving business hours never hangs on WhatsApp' do
+      stub_request(:get, settings_url).to_return(status: 200, headers: headers, body: { calling: {} }.to_json)
+      stub_request(:post, settings_url).to_return(status: 200, headers: headers, body: '{}')
+      allow(HTTParty).to receive(:get).and_call_original
+      allow(HTTParty).to receive(:post).and_call_original
+
+      service.calling_settings
+      service.update_call_hours('status' => 'DISABLED')
+
+      expect(HTTParty).to have_received(:get).with(settings_url, hash_including(timeout: 15))
+      expect(HTTParty).to have_received(:post).with(settings_url, hash_including(timeout: 15))
+    end
+
+    it 'sends only the calling status' do
+      request = stub_request(:post, settings_url).with(body: { calling: { status: 'ENABLED' } }.to_json)
+                                                 .to_return(status: 200, body: '{}', headers: headers)
+
+      service.update_calling_status('ENABLED')
+      expect(request).to have_been_requested
+    end
+
+    it "raises Meta's message when the setting is refused" do
+      error = { error: { message: 'Calling is not enabled', error_user_msg: 'Turn calling on first' } }
+      stub_request(:post, settings_url).to_return(status: 400, headers: headers, body: error.to_json)
+
+      expect { service.update_calling_status('ENABLED') }.to raise_error(StandardError)
+    end
+  end
+
+  describe '#send_call_permission_request' do
+    it 'returns the parsed body on success' do
+      stub_request(:post, messages_url)
+        .with(body: hash_including(messaging_product: 'whatsapp', to: '15551234567', type: 'interactive'))
+        .to_return(status: 200, body: { messages: [{ id: 'wamid' }] }.to_json, headers: headers)
+
+      expect(service.send_call_permission_request('15551234567')).to eq('messages' => [{ 'id' => 'wamid' }])
+    end
+
+    it 'uses recipient for a BSUID' do
+      stub_request(:post, messages_url)
+        .with(body: hash_including(messaging_product: 'whatsapp', recipient: 'IN.2081978709342942', type: 'interactive'))
+        .to_return(status: 200, body: { messages: [{ id: 'wamid' }] }.to_json, headers: headers)
+
+      service.send_call_permission_request('IN.2081978709342942')
+
+      expect(a_request(:post, messages_url).with { |request| JSON.parse(request.body).exclude?('to') }).to have_been_made
+    end
+  end
+
+  describe '#initiate_call' do
+    it 'returns the parsed body on success' do
+      stub_request(:post, calls_url)
+        .with(body: { messaging_product: 'whatsapp', to: '15551234567', action: 'connect',
+                      session: { sdp: 'sdp_offer', sdp_type: 'offer' } }.to_json)
+        .to_return(status: 200, body: { messages: [{ id: 'wacall_1' }] }.to_json, headers: headers)
+
+      expect(service.initiate_call('15551234567', 'sdp_offer')).to eq('messages' => [{ 'id' => 'wacall_1' }])
+    end
+
+    it 'uses recipient for a BSUID' do
+      stub_request(:post, calls_url)
+        .with(body: { messaging_product: 'whatsapp', recipient: 'IN.2081978709342942', action: 'connect',
+                      session: { sdp: 'sdp_offer', sdp_type: 'offer' } }.to_json)
+        .to_return(status: 200, body: { calls: [{ id: 'wacall_bsuid' }] }.to_json, headers: headers)
+
+      expect(service.initiate_call('IN.2081978709342942', 'sdp_offer')).to eq('calls' => [{ 'id' => 'wacall_bsuid' }])
+    end
+
+    it 'raises Voice::CallErrors::NoCallPermission when Meta returns error code 138006' do
+      stub_request(:post, calls_url).to_return(
+        status: 400,
+        body: { error: { code: 138_006, error_user_msg: 'No call permission' } }.to_json,
+        headers: headers
+      )
+
+      expect { service.initiate_call('15551234567', 'sdp_offer') }
+        .to raise_error(Voice::CallErrors::NoCallPermission, 'No call permission')
+    end
+
+    it 'raises Voice::CallErrors::CallFailed with a fallback message when the error body is non-JSON' do
+      stub_request(:post, calls_url).to_return(status: 502, body: '<html>502 Bad Gateway</html>',
+                                               headers: { 'Content-Type' => 'text/html' })
+
+      expect { service.initiate_call('15551234567', 'sdp_offer') }
+        .to raise_error(Voice::CallErrors::CallFailed, 'Failed to initiate call')
+    end
+  end
+end

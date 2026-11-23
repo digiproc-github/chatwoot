@@ -44,4 +44,44 @@ RSpec.describe Conversations::EventDataPresenter do
       expect(presenter.push_data.except(:applied_sla, :sla_events)).to include(expected_data)
     end
   end
+
+  describe '#widget_data' do
+    it 'returns only the conversation id and state' do
+      expect(presenter.widget_data).to eq(
+        id: conversation.display_id,
+        inbox_id: conversation.inbox_id,
+        contact_last_seen_at: conversation.contact_last_seen_at.to_i,
+        status: conversation.status
+      )
+    end
+  end
+
+  describe '#webhook_data' do
+    it 'includes account details for webhook consumers' do
+      expect(presenter.webhook_data[:account]).to eq(conversation.account.webhook_data)
+    end
+
+    it 'normalizes hard-break backslashes in message content' do
+      message = create(:message, conversation: conversation, account: conversation.account,
+                                 message_type: :outgoing, content: "Hello\\\nWorld")
+      data = presenter.webhook_data
+      webhook_message = data[:messages].first
+
+      expect(webhook_message).to be_present
+      expect(webhook_message[:content]).to eq("Hello\nWorld")
+      expect(webhook_message[:id]).to eq(message.id)
+    end
+
+    it 'preserves normal newlines in message content' do
+      create(:message, conversation: conversation, account: conversation.account,
+                       message_type: :outgoing, content: "Line one\n\nLine two")
+      webhook_message = presenter.webhook_data[:messages].first
+
+      expect(webhook_message[:content]).to eq("Line one\n\nLine two")
+    end
+
+    it 'returns empty messages when conversation has no chat messages' do
+      expect(presenter.webhook_data[:messages]).to eq([])
+    end
+  end
 end

@@ -1,99 +1,172 @@
 class Voice::InboundCallBuilder
-  attr_reader :account, :inbox, :from_number, :call_sid
+  attr_reader :inbox, :call_sid, :provider, :extra_meta, :source_ids, :contact_attributes
 
-  def self.perform!(account:, inbox:, from_number:, call_sid:)
-    new(account: account, inbox: inbox, from_number: from_number, call_sid: call_sid).perform!
+  # `caller` carries the contact identity: { source_ids:, contact_attributes: }. Twilio passes
+  # its single +phone source_id; WhatsApp passes the message-path phone/user_id/parent_user_id set.
+  def self.perform!(inbox:, call_sid:, caller:, provider: :twilio, extra_meta: {})
+    new(inbox: inbox, call_sid: call_sid, caller: caller, provider: provider, extra_meta: extra_meta).perform!
   end
 
-  def initialize(account:, inbox:, from_number:, call_sid:)
-    @account = account
+  def self.queue_ring_jobs(call)
+    queue_ring(call)
+    widen_ring_in_steps(call)
+    end_unanswered_in_time(call)
+    call
+  end
+
+  def self.queue_ring(call)
+    return unless call.ringing? && call.ring_state.key?('ring_recipient_ids') && !call.ring_state.key?('unreached_user_ids')
+    return if call.ring_state['rings_phones'] == false
+
+    ActiveRecord.after_all_transactions_commit { Voice::VoipPushJob.perform_later(call.id, 'ring') }
+  end
+
+  # A call widens its ring every step; see Voice::RingNextAgentJob
+  def self.widen_ring_in_steps(call)
+    return unless call.ringing?
+
+    ActiveRecord.after_all_transactions_commit do
+      Voice::RingNextAgentJob.set(wait: call.inbox.channel.ring_step_seconds.seconds).perform_later(call.id, call.ring_step)
+    end
+  end
+
+  # The caller hears the missed-call message once the inbox's ring time is up; a call answered or
+  # ended before then is left alone. See Voice::RingingTimeoutService.
+  def self.end_unanswered_in_time(call)
+    return unless call.twilio? && call.ringing?
+
+    ends_at = call.created_at + call.inbox.channel.unanswered_call_timeout_seconds.seconds
+    ActiveRecord.after_all_transactions_commit { Voice::EndUnansweredCallJob.set(wait_until: ends_at).perform_later(call.id) }
+  end
+  private_class_method :queue_ring, :widen_ring_in_steps, :end_unanswered_in_time
+
+  def initialize(inbox:, call_sid:, caller:, provider: :twilio, extra_meta: {})
     @inbox = inbox
-    @from_number = from_number
     @call_sid = call_sid
+    @provider = provider.to_sym
+    @extra_meta = extra_meta || {}
+    @source_ids = Array(caller[:source_ids]).compact_blank
+    @contact_attributes = caller[:contact_attributes] || {}
   end
 
   def perform!
-    timestamp = current_timestamp
+    existing = find_existing_call
+    return self.class.queue_ring_jobs(existing) if existing
 
     ActiveRecord::Base.transaction do
-      contact = ensure_contact!
-      contact_inbox = ensure_contact_inbox!(contact)
-      conversation = find_conversation || create_conversation!(contact, contact_inbox)
-      conversation.reload
-      update_conversation!(conversation, timestamp)
-      build_voice_message!(conversation, timestamp)
-      conversation
+      contact_inbox = ensure_contact_inbox!
+      contact = contact_inbox.contact
+      conversation = resolve_conversation!(contact, contact_inbox)
+      created = create_call!(contact, conversation)
+      # Recorded before the message, which names the agents a Twilio call rings as it is created
+      record_ring_audience(created) unless created.terminal?
+      message = Voice::CallMessageBuilder.new(created).perform!
+      created.update!(message_id: message.id)
+      self.class.queue_ring_jobs(created) unless created.terminal?
+      created
     end
+  rescue ActiveRecord::RecordNotUnique
+    # A concurrent provider retry won the create race; return what now exists.
+    find_existing_call || raise
   end
 
   private
 
-  def ensure_contact!
-    account.contacts.find_or_create_by!(phone_number: from_number) do |record|
-      record.name = from_number if record.name.blank?
-    end
+  def account
+    inbox.account
   end
 
-  def ensure_contact_inbox!(contact)
-    ContactInbox.find_or_create_by!(
-      contact_id: contact.id,
-      inbox_id: inbox.id
-    ) do |record|
-      record.source_id = from_number
-    end
+  # The agents rung are recorded in the transaction that creates the call, so the web's
+  # ringing card, the push and a missed-call notice go to the same agents even when the
+  # conversation is reassigned before the job runs, and a call the caller ends as soon as it
+  # is visible still has them.
+  def record_ring_audience(call)
+    rings_phones = account.feature_enabled?('channel_voice') && account.feature_enabled?('mobile_voice_push')
+    state = { 'ring_recipient_ids' => Voice::VoipPushService.recipients_for(call).map(&:id), 'rings_phones' => rings_phones }
+    call.update_columns(ring_state: call.ring_state.merge(state)) # rubocop:disable Rails/SkipsModelValidations
   end
 
-  def find_conversation
-    return if call_sid.blank?
-
-    account.conversations.includes(:contact).find_by(identifier: call_sid)
+  def find_existing_call
+    Call.where(account_id: account.id, inbox_id: inbox.id)
+        .find_by(provider: provider, provider_call_id: call_sid)
   end
 
-  def create_conversation!(contact, contact_inbox)
-    account.conversations.create!(
-      contact_inbox_id: contact_inbox.id,
-      inbox_id: inbox.id,
-      contact_id: contact.id,
-      status: :open,
-      identifier: call_sid
-    )
+  # Resolve the contact/ContactInbox the same way inbound messages do — match across every
+  # candidate source_id (phone + BSUID aliases) so a call reuses the existing contact. Shared
+  # with messaging via ContactInboxSourceIdResolver, which also rescues the concurrent-webhook
+  # create race.
+  #
+  # WhatsApp asks for the preferred alias so a call lands on the exact BSUID ContactInbox, the
+  # same one a message resolves; without it a legacy caller would keep answering through the
+  # phone row while messages moved on. Twilio has a single phone identity and opts out.
+  def ensure_contact_inbox!
+    ContactInboxSourceIdResolver.new(
+      inbox: inbox, source_ids: source_ids, contact_attributes: contact_attributes,
+      prefer_first_source_id: whatsapp_provider?
+    ).perform
   end
 
-  def update_conversation!(conversation, timestamp)
-    attrs = {
-      'call_direction' => 'inbound',
-      'call_status' => 'ringing',
-      'conference_sid' => Voice::Conference::Name.for(conversation),
-      'meta' => { 'initiated_at' => timestamp }
-    }
+  def resolve_conversation!(contact, contact_inbox)
+    reusable = reusable_conversation(contact_inbox)
+    return reusable if reusable
 
-    conversation.update!(
-      identifier: call_sid,
-      additional_attributes: attrs,
-      last_activity_at: current_time
-    )
+    conversation = account.conversations.new(contact_inbox_id: contact_inbox.id, inbox_id: inbox.id, contact_id: contact.id, status: :open)
+    conversation.call_ringing = announced_end_reason(conversation).nil?
+    conversation.save!
+    conversation
   end
 
-  def build_voice_message!(conversation, timestamp)
-    Voice::CallMessageBuilder.perform!(
+  # Scoped to the resolved ContactInbox, never to the contact. A dashboard merge leaves unrelated
+  # WhatsApp identities on the same contact, and a contact-wide lookup cannot tell them apart: it
+  # would answer a call through another identity's source_id. The conversation opened under a
+  # previous identity stays where it is, reachable under previous conversations.
+  def reusable_conversation(contact_inbox)
+    conversations = contact_inbox.conversations
+    return conversations.last if inbox.lock_to_single_conversation
+
+    conversations.where.not(status: :resolved).last
+  end
+
+  def whatsapp_provider?
+    provider == :whatsapp
+  end
+
+  def create_call!(contact, conversation)
+    call = Call.create!(
+      account: account,
+      inbox: inbox,
       conversation: conversation,
-      direction: 'inbound',
-      payload: {
-        call_sid: call_sid,
-        status: 'ringing',
-        conference_sid: conversation.additional_attributes['conference_sid'],
-        from_number: from_number,
-        to_number: inbox.channel&.phone_number
-      },
-      timestamps: { created_at: timestamp, ringing_at: timestamp }
+      contact: contact,
+      provider: provider,
+      direction: :incoming,
+      provider_call_id: call_sid,
+      **initial_state(conversation)
     )
+    # `conference_sid` is a Twilio bridging concept; WhatsApp goes browser↔Meta.
+    call.update!(conference_sid: call.default_conference_sid) if call.twilio?
+    call
   end
 
-  def current_timestamp
-    @current_timestamp ||= current_time.to_i
+  def initial_state(conversation)
+    now = Time.zone.now.to_i
+    meta = { 'initiated_at' => now }.merge(extra_meta.stringify_keys)
+    end_reason = announced_end_reason(conversation)
+    return { status: 'ringing', meta: meta } unless end_reason
+
+    { status: 'no_answer', end_reason: end_reason, meta: meta.merge('ended_at' => now) }
   end
 
-  def current_time
-    @current_time ||= Time.zone.now
+  # A call ends as it starts when the inbox is closed for calls, and a Twilio call also when nobody
+  # who could answer is online. One whose agents are all busy waits.
+  # Read once, so a call that crosses a working-hours boundary or an agent's status change is not
+  # held for a ring it never gets.
+  def announced_end_reason(conversation)
+    return @announced_end_reason if defined?(@announced_end_reason)
+
+    @announced_end_reason = if inbox.closed_for_calls?
+                              Call::OUTSIDE_WORKING_HOURS
+                            elsif provider == :twilio && Voice::RingRecipients.new(inbox: inbox, conversation: conversation).nobody_online?
+                              Call::NO_AGENTS_AVAILABLE
+                            end
   end
 end

@@ -270,4 +270,83 @@ describe MessageTemplates::HookExecutionService do
       expect(out_of_office_service).not_to receive(:perform)
     end
   end
+
+  context 'when an activity message is created on a conversation with a prior incoming message' do
+    it 'does not call ::MessageTemplates::Template::Greeting' do
+      contact = create(:contact, email: nil)
+      conversation = create(:conversation, contact: contact)
+      # Disable email collect so no template messages are created when the incoming message arrives
+      conversation.inbox.update(enable_email_collect: false)
+
+      create(:message, conversation: conversation, account: conversation.account, message_type: :incoming)
+
+      # Greeting is enabled after the incoming message exists, simulating a conversation that has not received a greeting yet
+      conversation.inbox.update(greeting_enabled: true, greeting_message: 'Hi, this is a greeting message')
+
+      greeting_service = double
+      allow(MessageTemplates::Template::Greeting).to receive(:new).and_return(greeting_service)
+      allow(greeting_service).to receive(:perform).and_return(true)
+
+      # Activity message — e.g. resolve, assignee change, label added
+      activity_message = create(:message, conversation: conversation, account: conversation.account,
+                                          message_type: 'activity', content: 'Conversation marked resolved!!')
+
+      described_class.new(message: activity_message).perform
+
+      expect(MessageTemplates::Template::Greeting).not_to have_received(:new)
+    end
+
+    it 'does not call ::MessageTemplates::Template::Greeting on outgoing messages' do
+      contact = create(:contact, email: nil)
+      conversation = create(:conversation, contact: contact)
+      # Disable email collect so no template messages are created when the incoming message arrives
+      conversation.inbox.update(enable_email_collect: false)
+
+      create(:message, conversation: conversation, account: conversation.account, message_type: :incoming)
+
+      # Greeting is enabled after the incoming message exists, simulating a conversation that has not received a greeting yet
+      conversation.inbox.update(greeting_enabled: true, greeting_message: 'Hi, this is a greeting message')
+
+      greeting_service = double
+      allow(MessageTemplates::Template::Greeting).to receive(:new).and_return(greeting_service)
+      allow(greeting_service).to receive(:perform).and_return(true)
+
+      outgoing_message = create(:message, conversation: conversation, account: conversation.account,
+                                          message_type: :outgoing)
+
+      described_class.new(message: outgoing_message).perform
+
+      expect(MessageTemplates::Template::Greeting).not_to have_received(:new)
+    end
+  end
+
+  context 'when the conversation has only a missed-call message' do
+    let(:conversation) { create(:conversation, contact: create(:contact)) }
+
+    before do
+      create(:message, conversation: conversation, account: conversation.account, message_type: :template,
+                       content: 'Sorry we missed your call', additional_attributes: { 'missed_call_message' => true })
+    end
+
+    it 'still sends the greeting' do
+      conversation.inbox.update!(greeting_enabled: true, greeting_message: 'Hi there')
+      greeting_service = instance_double(MessageTemplates::Template::Greeting, perform: true)
+      allow(MessageTemplates::Template::Greeting).to receive(:new).and_return(greeting_service)
+
+      create(:message, conversation: conversation, account: conversation.account)
+
+      expect(greeting_service).to have_received(:perform)
+    end
+
+    it 'still sends the out-of-office message' do
+      conversation.inbox.update!(working_hours_enabled: true, out_of_office_message: 'We are out of office')
+      conversation.inbox.working_hours.today.update!(closed_all_day: true)
+      out_of_office_service = instance_double(MessageTemplates::Template::OutOfOffice, perform: true)
+      allow(MessageTemplates::Template::OutOfOffice).to receive(:new).and_return(out_of_office_service)
+
+      create(:message, conversation: conversation, account: conversation.account)
+
+      expect(out_of_office_service).to have_received(:perform)
+    end
+  end
 end

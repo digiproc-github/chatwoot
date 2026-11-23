@@ -5,12 +5,19 @@ import { useAlert } from 'dashboard/composables';
 import { required } from '@vuelidate/validators';
 import router from '../../../../index';
 import { isPhoneE164OrEmpty, isNumber } from 'shared/helpers/Validators';
+import InboxesAPI from 'dashboard/api/inboxes';
 
 import NextButton from 'dashboard/components-next/button/Button.vue';
 
 export default {
   components: {
     NextButton,
+  },
+  props: {
+    enableCallingOnComplete: {
+      type: Boolean,
+      default: false,
+    },
   },
   setup() {
     return { v$: useVuelidate() };
@@ -20,6 +27,7 @@ export default {
       inboxName: '',
       phoneNumber: '',
       apiKey: '',
+      appSecret: '',
       phoneNumberId: '',
       businessAccountId: '',
     };
@@ -31,6 +39,7 @@ export default {
     inboxName: { required },
     phoneNumber: { required, isPhoneE164OrEmpty },
     apiKey: { required },
+    appSecret: { required },
     phoneNumberId: { required, isNumber },
     businessAccountId: { required, isNumber },
   },
@@ -52,12 +61,21 @@ export default {
               provider: 'whatsapp_cloud',
               provider_config: {
                 api_key: this.apiKey,
+                app_secret: this.appSecret,
                 phone_number_id: this.phoneNumberId,
                 business_account_id: this.businessAccountId,
               },
             },
           }
         );
+
+        if (this.enableCallingOnComplete) {
+          try {
+            await InboxesAPI.enableWhatsappCalling(whatsappChannel.id);
+          } catch (_) {
+            useAlert(this.$t('INBOX_MGMT.WHATSAPP_CALLING.ENABLE_FAILED'));
+          }
+        }
 
         router.replace({
           name: 'settings_inboxes_add_agents',
@@ -163,8 +181,27 @@ export default {
       </label>
     </div>
 
+    <div class="flex-shrink-0 flex-grow-0">
+      <label :class="{ error: v$.appSecret.$error }">
+        <span>
+          {{ $t('INBOX_MGMT.ADD.WHATSAPP.APP_SECRET.LABEL') }}
+        </span>
+        <input
+          v-model="appSecret"
+          type="password"
+          autocomplete="off"
+          :placeholder="$t('INBOX_MGMT.ADD.WHATSAPP.APP_SECRET.PLACEHOLDER')"
+          @blur="v$.appSecret.$touch"
+        />
+        <span v-if="v$.appSecret.$error" class="message">
+          {{ $t('INBOX_MGMT.ADD.WHATSAPP.APP_SECRET.ERROR') }}
+        </span>
+      </label>
+    </div>
+
     <div class="w-full mt-4">
       <NextButton
+        :disabled="uiFlags.isCreating"
         :is-loading="uiFlags.isCreating"
         type="submit"
         solid

@@ -28,6 +28,34 @@ RSpec.describe '/api/v1/widget/messages', type: :request do
         expect(json_response['meta']).not_to be_empty
       end
 
+      it 'returns only the type for a contact sender' do
+        contact.update!(email: 'stored@example.com', phone_number: '+15555550100')
+        create(:message, account: account, inbox: web_widget.inbox, conversation: conversation, message_type: :incoming, sender: contact)
+
+        get api_v1_widget_messages_url,
+            params: { website_token: web_widget.website_token },
+            headers: { 'X-Auth-Token' => token },
+            as: :json
+
+        senders = response.parsed_body['payload'].pluck('sender').compact
+        contact_senders = senders.select { |sender| sender['type'] == 'contact' }
+        expect(contact_senders).to be_present
+        expect(contact_senders).to all(eq('type' => 'contact'))
+      end
+
+      it 'keeps the agent details for an agent sender' do
+        agent = create(:user, account: account)
+        create(:message, account: account, inbox: web_widget.inbox, conversation: conversation, message_type: :outgoing, sender: agent)
+
+        get api_v1_widget_messages_url,
+            params: { website_token: web_widget.website_token },
+            headers: { 'X-Auth-Token' => token },
+            as: :json
+
+        senders = response.parsed_body['payload'].pluck('sender').compact
+        expect(senders).to include(hash_including('id' => agent.id, 'name' => agent.name, 'type' => 'user'))
+      end
+
       it 'returns empty messages', :skip_before do
         get api_v1_widget_messages_url,
             params: { website_token: web_widget.website_token },
@@ -42,6 +70,39 @@ RSpec.describe '/api/v1/widget/messages', type: :request do
   end
 
   describe 'POST /api/v1/widget/messages' do
+    context 'when the conversation is resolved and the inbox does not allow messages after resolved' do
+      before do
+        web_widget.inbox.update!(allow_messages_after_resolved: false)
+        conversation.resolved!
+      end
+
+      it 'rejects the message and does not create a new conversation' do
+        expect do
+          post api_v1_widget_messages_url,
+               params: { website_token: web_widget.website_token, message: { content: 'hello world' } },
+               headers: { 'X-Auth-Token' => token },
+               as: :json
+        end.to not_change(Conversation, :count).and not_change(Message, :count)
+
+        expect(response).to have_http_status(:forbidden)
+        expect(response.parsed_body['error']).to eq(I18n.t('errors.conversations.resolved'))
+      end
+
+      it 'accepts the message when the inbox allows messages after resolved' do
+        web_widget.inbox.update!(allow_messages_after_resolved: true)
+
+        expect do
+          post api_v1_widget_messages_url,
+               params: { website_token: web_widget.website_token, message: { content: 'hello world' } },
+               headers: { 'X-Auth-Token' => token },
+               as: :json
+        end.not_to change(Conversation, :count)
+
+        expect(response).to have_http_status(:success)
+        expect(conversation.reload.messages.last.content).to eq('hello world')
+      end
+    end
+
     context 'when post request is made' do
       it 'creates message in conversation' do
         conversation.destroy! # Test all params
@@ -54,6 +115,65 @@ RSpec.describe '/api/v1/widget/messages', type: :request do
         expect(response).to have_http_status(:success)
         json_response = response.parsed_body
         expect(json_response['content']).to eq(message_params[:content])
+      end
+
+      it 'creates conversation with custom_attributes when first message is sent' do
+        conversation.destroy!
+        message_params = { content: 'hello world', timestamp: Time.current }
+        custom_attributes = { plan: 'enterprise', source: 'website' }
+        post api_v1_widget_messages_url,
+             params: { website_token: web_widget.website_token, message: message_params, custom_attributes: custom_attributes },
+             headers: { 'X-Auth-Token' => token },
+             as: :json
+
+        expect(response).to have_http_status(:success)
+        new_conversation = contact.conversations.last
+        expect(new_conversation.custom_attributes).to include('plan' => 'enterprise', 'source' => 'website')
+      end
+
+      it 'creates conversation with labels when first message is sent' do
+        conversation.destroy!
+        label = create(:label, title: 'vip', account: account)
+        message_params = { content: 'hello world', timestamp: Time.current }
+        post api_v1_widget_messages_url,
+             params: { website_token: web_widget.website_token, message: message_params, labels: [label.title] },
+             headers: { 'X-Auth-Token' => token },
+             as: :json
+
+        expect(response).to have_http_status(:success)
+        new_conversation = contact.conversations.last
+        expect(new_conversation.label_list).to include('vip')
+      end
+
+      it 'ignores invalid labels when creating conversation with first message' do
+        conversation.destroy!
+        create(:label, title: 'valid-label', account: account)
+        message_params = { content: 'hello world', timestamp: Time.current }
+        post api_v1_widget_messages_url,
+             params: { website_token: web_widget.website_token, message: message_params, labels: %w[valid-label nonexistent] },
+             headers: { 'X-Auth-Token' => token },
+             as: :json
+
+        expect(response).to have_http_status(:success)
+        new_conversation = contact.conversations.last
+        expect(new_conversation.label_list).to include('valid-label')
+        expect(new_conversation.label_list).not_to include('nonexistent')
+      end
+
+      it 'does not apply labels or custom_attributes when conversation already exists' do
+        create(:label, title: 'vip', account: account)
+        message_params = { content: 'hello world', timestamp: Time.current }
+        custom_attributes = { plan: 'enterprise' }
+        post api_v1_widget_messages_url,
+             params: { website_token: web_widget.website_token, message: message_params,
+                       custom_attributes: custom_attributes, labels: ['vip'] },
+             headers: { 'X-Auth-Token' => token },
+             as: :json
+
+        expect(response).to have_http_status(:success)
+        conversation.reload
+        expect(conversation.custom_attributes).not_to include('plan' => 'enterprise')
+        expect(conversation.label_list).not_to include('vip')
       end
 
       it 'does not create the message' do
@@ -143,16 +263,51 @@ RSpec.describe '/api/v1/widget/messages', type: :request do
             account_id: conversation.account_id,
             inbox_id: conversation.inbox_id,
             message_type: :activity,
-            content: "Conversation was resolved by #{contact.name}"
+            content: "Conversation was resolved by #{contact.name}",
+            content_attributes: { activity: { type: 'conversation_status_changed', status: 'resolved' } }
           }
         )
         expect(response).to have_http_status(:success)
         expect(conversation.reload.open?).to be(true)
       end
     end
+
+    context 'when the sender is the contact' do
+      it 'returns only the type' do
+        contact.update!(email: 'stored@example.com', phone_number: '+15555550100')
+
+        post api_v1_widget_messages_url,
+             params: { website_token: web_widget.website_token, message: { content: 'hello world', timestamp: Time.current } },
+             headers: { 'X-Auth-Token' => token },
+             as: :json
+
+        expect(response).to have_http_status(:success)
+        expect(response.parsed_body['sender']).to eq('type' => 'contact')
+      end
+    end
   end
 
   describe 'PUT /api/v1/widget/messages' do
+    context 'when put request targets a message from another visitor in the same inbox' do
+      it 'does not update the foreign message' do
+        other_contact = create(:contact, account: account, email: nil)
+        other_contact_inbox = create(:contact_inbox, contact: other_contact, inbox: web_widget.inbox)
+        other_conversation = create(:conversation, contact: other_contact, account: account,
+                                                   inbox: web_widget.inbox, contact_inbox: other_contact_inbox)
+        foreign_message = create(:message, content_type: 'input_email', account: account,
+                                           inbox: web_widget.inbox, conversation: other_conversation)
+        original_email = foreign_message.submitted_email
+
+        put api_v1_widget_message_url(foreign_message.id),
+            params: { website_token: web_widget.website_token, contact: { email: Faker::Internet.email } },
+            headers: { 'X-Auth-Token' => token },
+            as: :json
+
+        expect(response).to have_http_status(:not_found)
+        expect(foreign_message.reload.submitted_email).to eq(original_email)
+      end
+    end
+
     context 'when put request is made with non existing email' do
       it 'updates message in conversation and creates a new contact' do
         message = create(:message, content_type: 'input_email', account: account, inbox: web_widget.inbox, conversation: conversation)
@@ -168,6 +323,37 @@ RSpec.describe '/api/v1/widget/messages', type: :request do
         expect(message.submitted_email).to eq(email)
         expect(message.conversation.contact.email).to eq(email)
         expect(message.conversation.contact.name).to eq(email.split('@')[0])
+      end
+    end
+
+    context 'when put request is made for a contact with stored details' do
+      it 'returns presence flags instead of the stored contact details' do
+        contact.update!(phone_number: '+15555550100', custom_attributes: { plan: 'pro' })
+        message = create(:message, content_type: 'input_email', account: account, inbox: web_widget.inbox, conversation: conversation)
+
+        put api_v1_widget_message_url(message.id),
+            params: { website_token: web_widget.website_token, contact: { email: Faker::Internet.email } },
+            headers: { 'X-Auth-Token' => token },
+            as: :json
+
+        expect(response).to have_http_status(:success)
+        expect(response.parsed_body['contact']).to eq('has_email' => true, 'has_name' => true, 'has_phone_number' => true)
+      end
+    end
+
+    context 'when put request is made with the email of an identified contact' do
+      it 'adds a private note to the conversation' do
+        message = create(:message, content_type: 'input_email', account: account, inbox: web_widget.inbox, conversation: conversation)
+        identified_contact = create(:contact, account: account, identifier: 'customer-1', email: 'customer@test.com')
+        put api_v1_widget_message_url(message.id),
+            params: { website_token: web_widget.website_token, contact: { email: 'customer@test.com' } },
+            headers: { 'X-Auth-Token' => token },
+            as: :json
+
+        expect(response).to have_http_status(:success)
+        note = conversation.messages.find_by(private: true)
+        expect(note.content).to include('customer@test.com')
+        expect(note.content).to include("/contacts/#{identified_contact.id}")
       end
     end
 
@@ -199,6 +385,19 @@ RSpec.describe '/api/v1/widget/messages', type: :request do
         message.reload
         expect(existing_contact.reload.name).to eq('John Doe')
         expect { contact.reload }.to raise_error(ActiveRecord::RecordNotFound)
+      end
+
+      it 'returns the presence flags of the contact it merged into' do
+        message = create(:message, account: account, content_type: 'input_email', inbox: web_widget.inbox, conversation: conversation)
+        create(:contact, account: account, email: 'bob@acme.com', name: 'Bob')
+
+        put api_v1_widget_message_url(message.id),
+            params: { website_token: web_widget.website_token, contact: { email: 'bob@acme.com' } },
+            headers: { 'X-Auth-Token' => token },
+            as: :json
+
+        expect(response).to have_http_status(:success)
+        expect(response.parsed_body['contact']['has_email']).to be true
       end
 
       it 'ignores the casing of email, updates message in conversation and deletes the current contact' do

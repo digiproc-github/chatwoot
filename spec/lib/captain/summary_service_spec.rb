@@ -7,12 +7,13 @@ RSpec.describe Captain::SummaryService do
   let(:service) { described_class.new(account: account, conversation_display_id: conversation.display_id) }
   let(:mock_chat) { instance_double(RubyLLM::Chat) }
   let(:mock_context) { instance_double(RubyLLM::Context, chat: mock_chat) }
-  let(:mock_response) { instance_double(RubyLLM::Message, content: 'Summary of conversation', input_tokens: 100, output_tokens: 50) }
+  let(:mock_response) { instance_double(RubyLLM::Message, content: 'Summary of conversation', tokens: RubyLLM::Tokens.new(input: 100, output: 50)) }
 
   before do
-    create(:installation_config, name: 'CAPTAIN_OPEN_AI_API_KEY', value: 'test-key')
+    InstallationConfig.find_or_initialize_by(name: 'CAPTAIN_OPEN_AI_API_KEY').update!(value: 'test-key')
     allow(Llm::Config).to receive(:with_api_key).and_yield(mock_context)
     allow(mock_chat).to receive(:with_instructions)
+    allow(mock_chat).to receive(:with_thinking).and_return(mock_chat)
     allow(mock_chat).to receive(:ask).and_return(mock_response)
     # Stub captain enabled check to allow specs to test base functionality
     # without enterprise module interference
@@ -21,9 +22,9 @@ RSpec.describe Captain::SummaryService do
   end
 
   describe '#perform' do
-    it 'passes correct model to API' do
+    it 'routes through the editor feature' do
       expect(service).to receive(:make_api_call).with(
-        hash_including(model: Captain::BaseTaskService::GPT_MODEL)
+        hash_including(feature: 'editor')
       ).and_call_original
 
       service.perform
@@ -35,7 +36,8 @@ RSpec.describe Captain::SummaryService do
       expect(service).to receive(:make_api_call) do |args|
         expect(args[:messages].length).to eq(2)
         expect(args[:messages][0][:role]).to eq('system')
-        expect(args[:messages][0][:content]).to eq('Summarize this')
+        expect(args[:messages][0][:content]).to include('Summarize this')
+        expect(args[:messages][0][:content]).to include("Reply in #{account.locale_english_name}")
         expect(args[:messages][1][:role]).to eq('user')
         expect(args[:messages][1][:content]).to be_a(String)
         { message: 'Summary' }

@@ -24,7 +24,7 @@ const PortalsSettingsIndexPage = () =>
 
 const meta = {
   featureFlag: FEATURE_FLAGS.HELP_CENTER,
-  permissions: ['administrator', 'agent', 'knowledge_base_manage'],
+  permissions: ['administrator', 'knowledge_base_manage'],
 };
 const portalRoutes = [
   {
@@ -61,6 +61,14 @@ const portalRoutes = [
     name: 'portals_categories_articles_index',
     meta,
     component: PortalsArticlesIndexPage,
+  },
+  {
+    path: getPortalRoute(
+      ':portalSlug/:locale/categories/:categorySlug/articles/new'
+    ),
+    name: 'portals_categories_articles_new',
+    meta,
+    component: PortalsArticlesNewPage,
   },
   {
     path: getPortalRoute(

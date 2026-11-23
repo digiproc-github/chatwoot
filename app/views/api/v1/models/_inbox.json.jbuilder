@@ -31,6 +31,7 @@ end
 ## TODO : Clean up and move the attributes into channel sub section
 
 json.tweets_enabled resource.channel.try(:tweets_enabled) if resource.twitter?
+json.provider_name resource.channel.try(:provider_name) if resource.facebook? || resource.instagram? || resource.tiktok?
 
 ## WebWidget Attributes
 json.allowed_domains resource.channel.try(:allowed_domains)
@@ -61,17 +62,31 @@ json.reauthorization_required resource.channel.try(:reauthorization_required?) i
 json.instagram_id resource.channel.try(:instagram_id) if resource.instagram?
 
 ## Tiktok Attributes
-json.reauthorization_required resource.channel.try(:reauthorization_required?) if resource.tiktok?
+if resource.tiktok?
+  json.business_id resource.channel.try(:business_id)
+  json.reauthorization_required resource.channel.try(:reauthorization_required?)
+end
+
+## Twitter Attributes
+json.profile_id resource.channel.try(:profile_id) if resource.twitter?
+
+## LINE Attributes
+json.line_channel_id resource.channel.try(:line_channel_id) if resource.channel_type == 'Channel::Line'
 
 ## Twilio Attributes
 json.messaging_service_sid resource.channel.try(:messaging_service_sid)
 json.phone_number resource.channel.try(:phone_number)
+if resource.sms? && Current.account_user&.administrator?
+  json.provider_config resource.channel.provider_config.to_h.slice('account_id', 'application_id', 'client_id')
+  json.bandwidth_oauth_enabled resource.channel.oauth?
+end
 json.medium resource.channel.try(:medium) if resource.twilio?
 if resource.twilio?
   json.content_templates resource.channel.try(:content_templates)
   if Current.account_user&.administrator?
     json.auth_token resource.channel.try(:auth_token)
     json.account_sid resource.channel.try(:account_sid)
+    json.api_key_sid resource.channel.try(:api_key_sid)
   end
 end
 
@@ -80,6 +95,10 @@ if resource.email?
   json.email resource.channel.try(:email)
   json.forwarding_enabled ENV.fetch('MAILER_INBOUND_EMAIL_DOMAIN', '').present?
   json.forward_to_email resource.channel.try(:forward_to_email) if ENV.fetch('MAILER_INBOUND_EMAIL_DOMAIN', '').present?
+  if Current.account_user&.administrator? && defined?(with_branded_email_layout) && with_branded_email_layout.present? &&
+     Current.account.feature_enabled?(:branded_email_templates)
+    json.branded_email_layout resource.branded_email_layout
+  end
 
   ## IMAP
   if Current.account_user&.administrator?
@@ -89,6 +108,7 @@ if resource.email?
     json.imap_port resource.channel.try(:imap_port)
     json.imap_enabled resource.channel.try(:imap_enabled)
     json.imap_enable_ssl resource.channel.try(:imap_enable_ssl)
+    json.imap_authentication resource.channel.try(:imap_authentication)
 
     if resource.channel.try(:microsoft?) || resource.channel.try(:google?) || resource.channel.try(:legacy_google?)
       json.reauthorization_required resource.channel.try(:provider_config).empty? || resource.channel.try(:reauthorization_required?)
@@ -113,6 +133,7 @@ end
 ## API Channel Attributes
 if resource.api?
   json.hmac_token resource.channel.try(:hmac_token) if Current.account_user&.administrator?
+  json.secret resource.channel.try(:secret) if Current.account_user&.administrator?
   json.webhook_url resource.channel.try(:webhook_url)
   json.inbox_identifier resource.channel.try(:identifier)
   json.additional_attributes resource.channel.try(:additional_attributes)
@@ -125,13 +146,63 @@ json.bot_name resource.channel.try(:bot_name) if resource.telegram?
 
 ### WhatsApp Channel
 if resource.whatsapp?
-  json.message_templates resource.channel.try(:message_templates)
+  message_templates = resource.channel.try(:message_templates)
+  json.message_templates message_templates.is_a?(Array) ? message_templates : []
   json.provider_config resource.channel.try(:provider_config) if Current.account_user&.administrator?
-  json.reauthorization_required resource.channel.try(:reauthorization_required?)
+  if Current.account_user&.administrator? &&
+     ChatwootApp.chatwoot_cloud? &&
+     (resource.channel.try(:provider_config) || {}).to_h['source'] == 'embedded_signup'
+    json.business_management_token_configured resource.channel.try(:business_management_token).present?
+  end
+  # Only show reauthorization for embedded signup; manual flow uses API keys, not OAuth
+  json.reauthorization_required(
+    (resource.channel.try(:provider_config) || {}).to_h['source'] == 'embedded_signup' &&
+    resource.channel.try(:reauthorization_required?)
+  )
 end
 
-## Voice Channel Attributes
-if resource.channel_type == 'Channel::Voice'
-  json.voice_call_webhook_url resource.channel.try(:voice_call_webhook_url)
-  json.voice_status_webhook_url resource.channel.try(:voice_status_webhook_url)
+## Voice attributes for TwilioSms
+if resource.twilio? && resource.channel.respond_to?(:voice_enabled?)
+  json.voice_enabled resource.channel.voice_enabled?
+  json.inbound_calls_enabled resource.channel.inbound_calls_enabled?
+  json.recording_enabled resource.channel.try(:recording_enabled?)
+  json.transcription_enabled resource.channel.try(:transcription_enabled?)
+  if ChatwootApp.enterprise?
+    greeting = Voice::CallAnnouncement.new(resource, :greeting)
+    json.call_greeting_enabled greeting.enabled?
+    json.call_greeting_message greeting.message
+    json.call_greeting_audio_url greeting.audio.attached? ? url_for(greeting.audio) : nil
+    unanswered = Voice::CallAnnouncement.new(resource, :unanswered)
+    json.unanswered_call_message unanswered.message
+    json.unanswered_call_audio_url unanswered.audio.attached? ? url_for(unanswered.audio) : nil
+    json.unanswered_call_timeout_seconds resource.channel.unanswered_call_timeout_seconds
+    # Empty while out-of-hours callers hear the missed-call message
+    out_of_hours = Voice::CallAnnouncement.new(resource, :out_of_hours)
+    json.out_of_hours_call_message out_of_hours.saved_message.to_s
+    json.out_of_hours_call_audio_url out_of_hours.audio.attached? ? url_for(out_of_hours.audio) : nil
+    json.partial! 'api/v1/models/call_routing', channel: resource.channel
+  end
+  json.account_auth_token_configured resource.channel.try(:account_auth_token_configured?) == true
+  json.voice_configured resource.channel.try(:twiml_app_sid).present?
+  json.has_api_key_secret resource.channel.try(:api_key_secret).present?
+  if resource.channel.try(:twiml_app_sid).present?
+    json.voice_call_webhook_url resource.channel.try(:voice_call_webhook_url)
+    json.voice_status_webhook_url resource.channel.try(:voice_status_webhook_url)
+  end
+end
+
+## Voice attribute for WhatsApp Cloud (only embedded-signup channels surface true)
+if resource.channel_type == 'Channel::Whatsapp' && resource.channel.respond_to?(:voice_enabled?)
+  json.voice_enabled resource.channel.voice_enabled?
+  json.inbound_calls_enabled resource.channel.inbound_calls_enabled?
+  json.recording_enabled resource.channel.try(:recording_enabled?)
+  json.transcription_enabled resource.channel.try(:transcription_enabled?)
+  json.partial! 'api/v1/models/call_routing', channel: resource.channel if ChatwootApp.enterprise?
+end
+
+## Bandwidth SMS callback authentication
+if resource.sms? && Current.account_user&.administrator?
+  json.callback_auth_username Channel::Sms::CALLBACK_USERNAME
+  json.callback_auth_password resource.channel.secret
+  json.callback_auth_enforced resource.channel.callback_auth_enforced
 end

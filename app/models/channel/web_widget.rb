@@ -51,10 +51,11 @@ class Channel::WebWidget < ApplicationRecord
             2 => :emoji_picker,
             3 => :end_conversation,
             4 => :use_inbox_avatar_for_bot,
+            5 => :allow_mobile_webview,
             :column => 'feature_flags',
             :check_for_column => false
 
-  enum reply_time: { in_a_few_minutes: 0, in_a_few_hours: 1, in_a_day: 2 }
+  enum :reply_time, { in_a_few_minutes: 0, in_a_few_hours: 1, in_a_day: 2 }
 
   def name
     'Website'

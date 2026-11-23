@@ -19,7 +19,7 @@ class SamlUserBuilder
     user = User.from_email(auth_attribute('email'))
 
     return create_user unless user
-    return existing_user_for_account(user) if user_belongs_to_account?(user)
+    return existing_user_for_account(user) if user_belongs_to_account?(user) && @saml_settings&.trusted_by_accounts_of?(user)
 
     raise AuthenticationFailed, I18n.t('auth.saml.authentication_failed')
   end
@@ -85,7 +85,7 @@ class SamlUserBuilder
 
     if matching_mapping['role']
       account_user.update(role: matching_mapping['role'])
-    elsif matching_mapping['custom_role_id']
+    elsif matching_mapping['custom_role_id'] && account.feature_enabled?('custom_roles')
       account_user.update(custom_role_id: matching_mapping['custom_role_id'])
     end
   end

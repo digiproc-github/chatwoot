@@ -18,6 +18,23 @@ describe ReportingEventListener do
       expect(account.reporting_events.where(name: 'conversation_resolved').count).to be 1
     end
 
+    context 'when rollup creation fails' do
+      let(:event) { Events::Base.new('conversation.resolved', Time.zone.now, conversation: conversation) }
+      let(:error) { StandardError.new('rollup failed') }
+      let(:exception_tracker) { instance_double(ChatwootExceptionTracker, capture_exception: true) }
+
+      before do
+        allow(ReportingEvents::RollupService).to receive(:perform).and_raise(error)
+        allow(ChatwootExceptionTracker).to receive(:new).and_return(exception_tracker)
+      end
+
+      it 'captures the error without interrupting raw event creation' do
+        expect { listener.conversation_resolved(event) }.not_to raise_error
+        expect(ChatwootExceptionTracker).to have_received(:new).with(error, account: account)
+        expect(account.reporting_events.where(name: 'conversation_resolved').count).to be 1
+      end
+    end
+
     context 'when business hours enabled for inbox' do
       let(:created_at) { Time.zone.parse('March 20, 2022 00:00') }
       let(:updated_at) { Time.zone.parse('March 26, 2022 23:59') }
@@ -289,38 +306,6 @@ describe ReportingEventListener do
       reporting_event = account.reporting_events.where(name: 'conversation_bot_handoff').first
       expect(reporting_event.value).to eq 600
       expect(reporting_event.event_end_time).to be_within(1.second).of(handoff_at)
-    end
-  end
-
-  describe '#conversation_captain_inference_resolved' do
-    it 'creates conversation_captain_inference_resolved event' do
-      expect(account.reporting_events.where(name: 'conversation_captain_inference_resolved').count).to be 0
-      decision_time = conversation.created_at + 60.seconds
-      event = Events::Base.new('conversation.captain_inference_resolved', decision_time, conversation: conversation)
-      allow(conversation).to receive(:updated_at).and_return(decision_time + 5.minutes)
-
-      listener.conversation_captain_inference_resolved(event)
-
-      reporting_event = account.reporting_events.where(name: 'conversation_captain_inference_resolved').first
-      expect(reporting_event).to be_present
-      expect(reporting_event.value).to eq 60
-      expect(reporting_event.event_end_time).to be_within(1.second).of(decision_time)
-    end
-  end
-
-  describe '#conversation_captain_inference_handoff' do
-    it 'creates conversation_captain_inference_handoff event' do
-      expect(account.reporting_events.where(name: 'conversation_captain_inference_handoff').count).to be 0
-      decision_time = conversation.created_at + 90.seconds
-      event = Events::Base.new('conversation.captain_inference_handoff', decision_time, conversation: conversation)
-      allow(conversation).to receive(:updated_at).and_return(decision_time + 5.minutes)
-
-      listener.conversation_captain_inference_handoff(event)
-
-      reporting_event = account.reporting_events.where(name: 'conversation_captain_inference_handoff').first
-      expect(reporting_event).to be_present
-      expect(reporting_event.value).to eq 90
-      expect(reporting_event.event_end_time).to be_within(1.second).of(decision_time)
     end
   end
 

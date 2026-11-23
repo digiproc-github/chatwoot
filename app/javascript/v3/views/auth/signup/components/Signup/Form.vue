@@ -1,11 +1,12 @@
 <script setup>
 import { ref, computed, reactive } from 'vue';
+import DOMPurify from 'dompurify';
 import { useVuelidate } from '@vuelidate/core';
 import { required, minLength, email } from '@vuelidate/validators';
 import { useStore } from 'vuex';
 import { useI18n } from 'vue-i18n';
+import { useRouter } from 'vue-router';
 import { useAlert } from 'dashboard/composables';
-import { DEFAULT_REDIRECT_URL } from 'dashboard/constants/globals';
 import VueHcaptcha from '@hcaptcha/vue3-hcaptcha';
 import FormInput from '../../../../../components/Form/Input.vue';
 import NextButton from 'dashboard/components-next/button/Button.vue';
@@ -15,10 +16,18 @@ import GoogleOAuthButton from '../../../../../components/GoogleOauth/Button.vue'
 import { register } from '../../../../../api/auth';
 import * as CompanyEmailValidator from 'company-email-validator';
 
+const props = defineProps({
+  shopifyPendingInstall: {
+    type: String,
+    default: '',
+  },
+});
+
 const MIN_PASSWORD_LENGTH = 6;
 
 const store = useStore();
 const { t } = useI18n();
+const router = useRouter();
 
 const hCaptcha = ref(null);
 const isPasswordFocused = ref(false);
@@ -60,12 +69,15 @@ const termsLink = computed(() =>
     )
 );
 
+const sanitizedTermsLink = computed(() => DOMPurify.sanitize(termsLink.value));
+
 const allowedLoginMethods = computed(
   () => window.chatwootConfig.allowedLoginMethods || ['email']
 );
 
 const showGoogleOAuth = computed(
   () =>
+    !props.shopifyPendingInstall &&
     allowedLoginMethods.value.includes('google_oauth') &&
     Boolean(window.chatwootConfig.googleOAuthClientId)
 );
@@ -75,8 +87,14 @@ const isFormValid = computed(() => !v$.value.$invalid);
 const performRegistration = async () => {
   isSignupInProgress.value = true;
   try {
-    await register(credentials);
-    window.location = DEFAULT_REDIRECT_URL;
+    await register({
+      ...credentials,
+      shopifyPendingInstallToken: props.shopifyPendingInstall,
+    });
+    router.push({
+      name: 'auth_verify_email',
+      state: { email: credentials.email },
+    });
   } catch (error) {
     const errorMessage = error?.message || t('REGISTER.API.ERROR_MESSAGE');
     if (globalConfig.value.hCaptchaSiteKey) {
@@ -182,7 +200,7 @@ const onCaptchaError = () => {
     </GoogleOAuthButton>
     <p
       class="text-sm mt-5 mb-0 text-n-slate-11 [&>a]:text-n-blue-10 [&>a]:font-medium [&>a]:hover:text-n-blue-11"
-      v-html="termsLink"
+      v-html="sanitizedTermsLink"
     />
   </div>
 </template>

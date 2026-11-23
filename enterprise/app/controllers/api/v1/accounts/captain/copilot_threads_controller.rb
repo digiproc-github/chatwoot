@@ -1,19 +1,22 @@
 class Api::V1::Accounts::Captain::CopilotThreadsController < Api::V1::Accounts::BaseController
+  include Captain::Copilot::ConversationAccess
+
   before_action :ensure_message, only: :create
+  before_action :ensure_accessible_conversation, only: :create
 
   def index
     @copilot_threads = Current.account.copilot_threads
                               .where(user_id: Current.user.id)
                               .includes(:user, :assistant)
-                              .order(created_at: :desc)
+                              .order(created_at: :desc, id: :desc)
                               .page(permitted_params[:page] || 1)
-                              .per(5)
+                              .per(20)
   end
 
   def create
     ActiveRecord::Base.transaction do
       @copilot_thread = Current.account.copilot_threads.create!(
-        title: copilot_thread_params[:message],
+        title: copilot_thread_params[:message].truncate(ApplicationRecord::MAX_STRING_COLUMN_LENGTH, omission: ''),
         user: Current.user,
         assistant: assistant
       )
@@ -27,21 +30,66 @@ class Api::V1::Accounts::Captain::CopilotThreadsController < Api::V1::Accounts::
     end
   end
 
+  # Stops what Copilot is working on in the thread. The panel learns of the stop from the agent's message, which the stop
+  # marks.
+  def stop
+    Current.account.copilot_threads.find_by!(id: params[:id], user: Current.user).stop
+    head :ok
+  end
+
   private
 
+  # A reply suggestion runs its own job, not a workflow turn, so the Captain check that turns make does not cover it.
+  # Checking here covers both.
   def build_copilot_response(copilot_message)
-    if Current.account.usage_limits[:captain][:responses][:current_available].positive?
-      copilot_message.enqueue_response_job(copilot_thread_params[:conversation_id], Current.user.id)
+    if !Current.account.feature_enabled?('captain_integration')
+      create_failed_response(copilot_message, I18n.t('captain.copilot_disabled'))
+    elsif Current.account.usage_limits[:captain][:responses][:current_available].positive?
+      enqueue_copilot_response(copilot_message)
     else
-      copilot_message.copilot_thread.copilot_messages.create!(
-        message_type: :assistant,
-        message: { content: I18n.t('captain.copilot_limit') }
-      )
+      create_failed_response(copilot_message, I18n.t('captain.copilot_limit'))
     end
+  end
+
+  def create_failed_response(copilot_message, content)
+    copilot_message.copilot_thread.copilot_messages.create!(
+      message_type: :assistant,
+      message: { content: content, status: 'failed' }
+    )
+  end
+
+  def enqueue_copilot_response(copilot_message)
+    return enqueue_reply_suggestion if reply_suggestion?
+
+    copilot_message.enqueue_response_job(copilot_thread_params[:conversation_id])
+  end
+
+  def enqueue_reply_suggestion
+    Captain::Copilot::ReplySuggestionJob.perform_later(
+      assistant: @copilot_thread.assistant,
+      conversation_id: copilot_thread_params[:conversation_id],
+      user_id: Current.user.id,
+      copilot_thread_id: @copilot_thread.id
+    )
   end
 
   def ensure_message
     return render_could_not_create_error(I18n.t('captain.copilot_message_required')) if copilot_thread_params[:message].blank?
+  end
+
+  def ensure_accessible_conversation
+    return unless reply_suggestion?
+
+    conversation = accessible_conversation(
+      account: Current.account,
+      user: Current.user,
+      display_id: copilot_thread_params[:conversation_id]
+    )
+    raise ActiveRecord::RecordNotFound, 'Conversation not found' if conversation.blank?
+  end
+
+  def reply_suggestion?
+    copilot_thread_params[:request_type] == 'reply_suggestion'
   end
 
   def assistant
@@ -49,7 +97,7 @@ class Api::V1::Accounts::Captain::CopilotThreadsController < Api::V1::Accounts::
   end
 
   def copilot_thread_params
-    params.permit(:message, :assistant_id, :conversation_id)
+    params.permit(:message, :assistant_id, :conversation_id, :request_type)
   end
 
   def permitted_params

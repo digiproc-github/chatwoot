@@ -79,6 +79,20 @@ describe('composeConversationHelper', () => {
         channelType: INBOX_TYPES.EMAIL,
       });
     });
+
+    it('uses the voice glyph for a voice-enabled inbox', () => {
+      const inboxes = [
+        {
+          id: 2,
+          name: 'WhatsApp Cloud',
+          channelType: INBOX_TYPES.WHATSAPP,
+          voiceEnabled: true,
+        },
+      ];
+
+      const result = helpers.buildContactableInboxesList(inboxes);
+      expect(result[0].icon).toBe('i-woot-whatsapp-voice');
+    });
   });
 
   describe('getCapitalizedNameFromEmail', () => {
@@ -268,6 +282,17 @@ describe('composeConversationHelper', () => {
     it('prepares regular files', () => {
       const files = [{ resource: { file: 'file1' } }];
       expect(helpers.prepareAttachmentPayload(files, false)).toEqual(['file1']);
+    });
+
+    it('prepares files that were not uploaded directly', () => {
+      const files = [
+        { blobSignedId: 'signed1' },
+        { resource: { file: 'file1' } },
+      ];
+      expect(helpers.prepareAttachmentPayload(files, true)).toEqual([
+        'signed1',
+        'file1',
+      ]);
     });
   });
 

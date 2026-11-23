@@ -1,15 +1,16 @@
 <script setup>
-import { computed, ref, onMounted, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { computed, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { useMapGetter, useStore } from 'dashboard/composables/store.js';
 import allLocales from 'shared/constants/locales.js';
 import { getArticleStatus } from 'dashboard/helper/portalHelper.js';
 import ArticlesPage from 'dashboard/components-next/HelpCenter/Pages/ArticlePage/ArticlesPage.vue';
 
 const route = useRoute();
+const router = useRouter();
 const store = useStore();
 
-const pageNumber = ref(1);
+const searchQuery = computed(() => route.query.search || '');
 
 const allArticles = useMapGetter('articles/allArticles');
 const articlesSortedByPosition = useMapGetter(
@@ -25,9 +26,11 @@ const selectedPortalSlug = computed(() => route.params.portalSlug);
 const selectedCategorySlug = computed(() => route.params.categorySlug);
 const status = computed(() => getArticleStatus(route.params.tab));
 
-const author = computed(() =>
-  route.params.tab === 'mine' ? currentUserId.value : null
-);
+const author = computed(() => {
+  // Preserve existing links to the Mine tab.
+  if (route.params.tab === 'mine') return String(currentUserId.value);
+  return route.query.author_id || '';
+});
 
 const activeLocale = computed(() => route.params.locale);
 const portal = computed(() => getPortalBySlug.value(selectedPortalSlug.value));
@@ -66,19 +69,21 @@ const articles = computed(() =>
   isCategoryArticles.value ? articlesSortedByPosition.value : allArticles.value
 );
 
-const fetchArticles = ({ pageNumber: pageNumberParam } = {}) => {
+const fetchArticles = (pageNumber = 1) =>
   store.dispatch('articles/index', {
-    pageNumber: pageNumberParam || pageNumber.value,
+    pageNumber,
     portalSlug: selectedPortalSlug.value,
     locale: activeLocale.value,
     status: status.value,
-    authorId: author.value,
+    authorId: author.value || undefined,
     categorySlug: selectedCategorySlug.value,
+    query: searchQuery.value || undefined,
   });
-};
 
-const onPageChange = pageNumberParam => {
-  fetchArticles({ pageNumber: pageNumberParam });
+const onSearch = query => {
+  router.replace({
+    query: { ...route.query, search: query || undefined },
+  });
 };
 
 const fetchPortalAndItsCategories = async locale => {
@@ -92,18 +97,9 @@ const fetchPortalAndItsCategories = async locale => {
   store.dispatch('agents/get');
 };
 
-onMounted(() => {
-  fetchArticles();
+watch([() => route.params, author, searchQuery], () => fetchArticles(), {
+  immediate: true,
 });
-
-watch(
-  () => route.params,
-  () => {
-    pageNumber.value = 1;
-    fetchArticles();
-  },
-  { deep: true, immediate: true }
-);
 </script>
 
 <template>
@@ -115,10 +111,13 @@ watch(
       :categories="categories"
       :allowed-locales="allowedLocales"
       :meta="meta"
+      :author-id="author"
       :portal-meta="portalMeta"
       :is-category-articles="isCategoryArticles"
-      @page-change="onPageChange"
+      @page-change="fetchArticles"
+      @search="onSearch"
       @fetch-portal="fetchPortalAndItsCategories"
+      @refresh-articles="fetchArticles"
     />
   </div>
 </template>

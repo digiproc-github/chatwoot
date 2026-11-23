@@ -4,6 +4,8 @@ class MessageTemplates::HookExecutionService
   def perform
     return if conversation.last_incoming_message.blank?
     return if message.auto_reply_email?
+    # A call is not a chat message; greetings, out-of-office and bot replies would reach the caller as SMS.
+    return if message.voice_call?
 
     trigger_templates
   end
@@ -29,17 +31,19 @@ class MessageTemplates::HookExecutionService
     # ensures better UX by not interrupting active conversations at the end of business hours
     return false if conversation.messages.outgoing.where(private: false).exists?(['created_at > ?', 5.minutes.ago])
 
-    inbox.out_of_office? && conversation.messages.today.template.empty? && inbox.out_of_office_message.present?
+    inbox.out_of_office? && conversation.messages.today.template.without_missed_call_messages.empty? && inbox.out_of_office_message.present?
   end
 
   def first_message_from_contact?
-    conversation.messages.outgoing.count.zero? && conversation.messages.template.count.zero?
+    conversation.messages.outgoing.count.zero? && conversation.messages.template.without_missed_call_messages.count.zero?
   end
 
   def should_send_greeting?
     return false if conversation.campaign.present?
     # should not send if its a tweet message
     return false if conversation.tweet?
+    # should not send for outbound messages
+    return false unless message.incoming?
 
     first_message_from_contact? && inbox.greeting_enabled? && inbox.greeting_message.present?
   end
@@ -51,6 +55,8 @@ class MessageTemplates::HookExecutionService
   # TODO: we should be able to reduce this logic once we have a toggle for email collect messages
   def should_send_email_collect?
     return false if conversation.campaign.present?
+    # Only react to a contact's incoming message, not to the template messages this hook creates.
+    return false unless message.incoming?
 
     !contact_has_email? && inbox.web_widget? && !email_collect_was_sent?
   end

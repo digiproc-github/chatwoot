@@ -21,6 +21,7 @@ class ReportingEventListener < BaseListener
 
     create_bot_resolved_event(conversation, reporting_event)
     reporting_event.save!
+    safe_rollup(reporting_event)
   end
 
   def first_reply_created(event)
@@ -42,6 +43,7 @@ class ReportingEventListener < BaseListener
     )
 
     reporting_event.save!
+    safe_rollup(reporting_event)
   end
 
   def reply_created(event)
@@ -66,13 +68,16 @@ class ReportingEventListener < BaseListener
       event_end_time: message.created_at
     )
     reporting_event.save!
+    safe_rollup(reporting_event)
   end
 
   def conversation_bot_handoff(event)
     conversation = extract_conversation_and_account(event)[0]
     event_end_time = event.timestamp
 
-    # check if a conversation_bot_handoff event exists for this conversation
+    # Best-effort guard: raw report reads count bot handoffs with DISTINCT conversation_id,
+    # while rollup counts assume one conversation_bot_handoff event per conversation.
+    # That uniqueness is not currently enforced at the database level.
     bot_handoff_event = ReportingEvent.find_by(conversation_id: conversation.id, name: 'conversation_bot_handoff')
     return if bot_handoff_event.present?
 
@@ -90,14 +95,7 @@ class ReportingEventListener < BaseListener
       event_end_time: event_end_time
     )
     reporting_event.save!
-  end
-
-  def conversation_captain_inference_resolved(event)
-    create_captain_inference_event(event, 'conversation_captain_inference_resolved')
-  end
-
-  def conversation_captain_inference_handoff(event)
-    create_captain_inference_event(event, 'conversation_captain_inference_handoff')
+    safe_rollup(reporting_event)
   end
 
   def conversation_opened(event)
@@ -142,22 +140,6 @@ class ReportingEventListener < BaseListener
     reporting_event.save!
   end
 
-  def create_captain_inference_event(event, event_name)
-    conversation = extract_conversation_and_account(event)[0]
-    time_to_event = event.timestamp.to_i - conversation.created_at.to_i
-
-    ReportingEvent.create!(
-      name: event_name,
-      value: time_to_event,
-      account_id: conversation.account_id,
-      inbox_id: conversation.inbox_id,
-      user_id: conversation.assignee_id,
-      conversation_id: conversation.id,
-      event_start_time: conversation.created_at,
-      event_end_time: event.timestamp
-    )
-  end
-
   def create_bot_resolved_event(conversation, reporting_event)
     return unless conversation.inbox.active_bot?
     # We don't want to create a bot_resolved event if there is user interaction on the conversation
@@ -166,5 +148,16 @@ class ReportingEventListener < BaseListener
     bot_resolved_event = reporting_event.dup
     bot_resolved_event.name = 'conversation_bot_resolved'
     bot_resolved_event.save!
+    safe_rollup(bot_resolved_event)
+  end
+
+  def safe_rollup(reporting_event)
+    # Rollups are derived from the raw reporting event. If a transient rollup write
+    # failure bubbles out here, Sidekiq retries the dispatcher job and can insert the
+    # same raw event again. That can temporarily under-report rollups, but the source
+    # event is preserved and rollup data can be rebuilt or re-applied later.
+    ReportingEvents::RollupService.perform(reporting_event)
+  rescue StandardError => e
+    ChatwootExceptionTracker.new(e, account: reporting_event.account).capture_exception
   end
 end

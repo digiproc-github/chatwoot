@@ -16,6 +16,8 @@ class ArticlesAPI extends PortalsAPI {
     authorId,
     categorySlug,
     sort,
+    query,
+    signal,
   }) {
     const url = getArticleSearchURL({
       pageNumber,
@@ -25,16 +27,18 @@ class ArticlesAPI extends PortalsAPI {
       authorId,
       categorySlug,
       sort,
+      query,
       host: this.url,
     });
 
-    return axios.get(url);
+    return axios.get(url, { signal });
   }
 
-  searchArticles({ portalSlug, query }) {
+  searchArticles({ portalSlug, query, status }) {
     const url = getArticleSearchURL({
       portalSlug,
       query,
+      status,
       host: this.url,
     });
     return axios.get(url);
@@ -42,6 +46,10 @@ class ArticlesAPI extends PortalsAPI {
 
   getArticle({ id, portalSlug }) {
     return axios.get(`${this.url}/${portalSlug}/articles/${id}`);
+  }
+
+  getPreviewToken({ id, portalSlug }) {
+    return axios.get(`${this.url}/${portalSlug}/articles/${id}/preview_token`);
   }
 
   updateArticle({ portalSlug, articleId, articleObj }) {
@@ -71,6 +79,34 @@ class ArticlesAPI extends PortalsAPI {
       positions_hash: reorderedGroup,
       category_slug: categorySlug,
     });
+  }
+
+  bulkTranslate({ portalSlug, articleIds, locale, categoryId, force = false }) {
+    return axios.post(
+      `${this.url}/${portalSlug}/articles/bulk_actions/translate`,
+      { ids: articleIds, locale, category_id: categoryId, force }
+    );
+  }
+
+  bulkUpdateStatus({ portalSlug, articleIds, status }) {
+    return axios.patch(
+      `${this.url}/${portalSlug}/articles/bulk_actions/update_status`,
+      { ids: articleIds, status }
+    );
+  }
+
+  bulkUpdateCategory({ portalSlug, articleIds, categoryId }) {
+    return axios.patch(
+      `${this.url}/${portalSlug}/articles/bulk_actions/update_category`,
+      { ids: articleIds, category_id: categoryId }
+    );
+  }
+
+  bulkDelete({ portalSlug, articleIds }) {
+    return axios.delete(
+      `${this.url}/${portalSlug}/articles/bulk_actions/delete_articles`,
+      { data: { ids: articleIds } }
+    );
   }
 }
 
