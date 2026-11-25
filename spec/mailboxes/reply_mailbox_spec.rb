@@ -52,6 +52,7 @@ RSpec.describe ReplyMailbox do
           assignee: agent,
           inbox: email_channel.inbox,
           account: account,
+          contact: create(:contact, email: 'sony@chatwoot.com', account: account),
           additional_attributes: { mail_subject: "Discussion: Let's debate these attachments" }
         )
       end
@@ -97,6 +98,75 @@ RSpec.describe ReplyMailbox do
 
         expect(account.conversations.last.contact.email).to eq('vendor@example.com')
         expect(account.conversations.find_by(contact: Contact.from_email('supplier@example.com')).messages.count).to eq(1)
+      end
+    end
+
+    context 'when someone who was not visible on the thread replies' do
+      let(:email_channel) { create(:channel_email, email: 'test@example.com', account: account) }
+      let(:customer) { create(:contact, email: 'customer@example.com', account: account) }
+      let(:origin) { create(:conversation, assignee: agent, inbox: email_channel.inbox, account: account, contact: customer) }
+      let(:reply_address) { "reply+#{origin.uuid}@example.com" }
+
+      before do
+        create(:message, conversation: origin, account: account, inbox: email_channel.inbox, message_type: :incoming, sender: customer,
+                         content: 'Original question', source_id: 'question@customer.example.com',
+                         content_attributes: { email: { from: ['customer@example.com'], to: ['test@example.com'] } })
+        create(:message, conversation: origin, account: account, inbox: email_channel.inbox, message_type: :outgoing, sender: agent,
+                         content: 'Agent answer', content_attributes: { cc_emails: ['visible@example.com'], bcc_emails: ['hidden@example.com'] })
+      end
+
+      it 'moves a reply from an agent BCC recipient to a new conversation linked to the original one' do
+        hidden_reply = create_inbound_email_from_mail(from: 'hidden@example.com', to: reply_address, subject: 'Re: Question',
+                                                      body: 'Reply from the BCC recipient')
+
+        expect { described_class.receive hidden_reply }.to change(account.conversations, :count).by(1)
+
+        split_conversation = account.conversations.last
+        expect(origin.messages.incoming.count).to eq(1)
+        expect(split_conversation.contact.email).to eq('hidden@example.com')
+        expect(split_conversation.additional_attributes['split_from_conversation_id']).to eq(origin.id)
+        expect(split_conversation.messages.activity.pluck(:content))
+          .to include("This conversation originated from conversation ##{origin.display_id}")
+        expect(split_conversation.messages.where(private: true).last.content).to include('Original question')
+        expect(split_conversation.messages.incoming.last.sender.email).to eq('hidden@example.com')
+      end
+
+      it 'moves a reply-all from a customer BCC recipient to a new conversation' do
+        colleague_reply = create_inbound_email_from_mail(from: 'colleague@example.com', to: 'test@example.com', cc: 'customer@example.com',
+                                                         subject: 'Re: Question', in_reply_to: '<question@customer.example.com>',
+                                                         body: 'Reply from the colleague')
+
+        expect { described_class.receive colleague_reply }.to change(account.conversations, :count).by(1)
+
+        expect(origin.messages.incoming.count).to eq(1)
+        expect(account.conversations.last.contact.email).to eq('colleague@example.com')
+      end
+
+      it 'keeps further replies from the same sender in their split conversation' do
+        described_class.receive create_inbound_email_from_mail(from: 'hidden@example.com', to: reply_address, subject: 'Re: Question',
+                                                               body: 'First reply')
+        second_reply = create_inbound_email_from_mail(from: 'hidden@example.com', to: reply_address, subject: 'Re: Question',
+                                                      body: 'Second reply')
+
+        expect { described_class.receive second_reply }.not_to change(account.conversations, :count)
+        expect(account.conversations.last.messages.incoming.count).to eq(2)
+      end
+
+      it 'keeps a reply from a CC recipient in the original conversation, attributed to them' do
+        cc_reply = create_inbound_email_from_mail(from: 'visible@example.com', to: reply_address, subject: 'Re: Question',
+                                                  body: 'Reply from the CC recipient')
+
+        expect { described_class.receive cc_reply }.not_to change(account.conversations, :count)
+        expect(origin.messages.incoming.last.content).to include('Reply from the CC recipient')
+        expect(origin.messages.incoming.last.sender.email).to eq('visible@example.com')
+      end
+
+      it 'keeps a reply from the contact in the original conversation' do
+        customer_reply = create_inbound_email_from_mail(from: 'customer@example.com', to: reply_address, subject: 'Re: Question',
+                                                        body: 'Reply from the customer')
+
+        expect { described_class.receive customer_reply }.not_to change(account.conversations, :count)
+        expect(origin.messages.incoming.last.sender).to eq(customer)
       end
     end
 
@@ -215,6 +285,7 @@ RSpec.describe ReplyMailbox do
           assignee: agent,
           inbox: email_channel.inbox,
           account: account,
+          contact: create(:contact, email: 'reply+someidmfdvkjdnkjciwyreowuero83@chatwoot.com', account: account),
           additional_attributes: { mail_subject: "Discussion: Let's debate these attachments" }
         )
       end
@@ -243,6 +314,7 @@ RSpec.describe ReplyMailbox do
           assignee: agent,
           inbox: email_channel.inbox,
           account: account,
+          contact: create(:contact, email: 'sony@chatwoot.com', account: account),
           additional_attributes: { mail_subject: "Discussion: Let's debate these attachments" }
         )
       end
@@ -325,6 +397,7 @@ RSpec.describe ReplyMailbox do
           assignee: agent,
           inbox: email_channel.inbox,
           account: account,
+          contact: create(:contact, email: 'sony@chatwoot.com', account: account),
           additional_attributes: { mail_subject: "Discussion: Let's debate these attachments" }
         )
       end

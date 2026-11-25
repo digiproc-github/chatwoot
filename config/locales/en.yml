@@ -477,6 +477,9 @@ en:
         not_sent_due_to_messaging_window: 'CSAT survey not sent due to outgoing message restrictions'
       auto_resolve:
         not_sent_due_to_messaging_window: 'Auto-resolve message not sent due to outgoing message restrictions'
+      email_split:
+        originated_from: 'This conversation originated from conversation #%{display_id}'
+        original_message: "Original message from conversation #%{display_id}:\n\n%{content}"
       muted: '%{user_name} has muted the conversation'
       unmuted: '%{user_name} has unmuted the conversation'
       via_copilot: '%{activity} via Copilot'

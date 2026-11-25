@@ -4,9 +4,12 @@ class Mailbox::ConversationFinderStrategies::NewConversationStrategy < Mailbox::
 
   attr_accessor :processed_mail, :account, :inbox, :contact, :contact_inbox, :conversation, :channel
 
-  def initialize(mail)
+  # split_from: a conversation the sender was not visible on (see Mailbox::ConversationFinder).
+  # The new conversation goes to that conversation's inbox, because a reply to its reply+uuid address names no inbox address.
+  def initialize(mail, split_from: nil)
     super(mail)
-    @channel = EmailChannelFinder.new(mail).perform
+    @split_from = split_from
+    @channel = split_from.present? ? split_from.inbox.channel : EmailChannelFinder.new(mail).perform
     return unless @channel
 
     @account = @channel.account
@@ -26,7 +29,11 @@ class Mailbox::ConversationFinderStrategies::NewConversationStrategy < Mailbox::
 
     # Prepare contact (persisted), reuse the sender's conversation for the thread or build one (not persisted)
     find_or_create_contact
-    find_conversation_by_in_reply_to || build_conversation
+    if @split_from.present?
+      Mailbox::OriginContext.split_conversation_for(@contact, @split_from) || build_conversation
+    else
+      find_conversation_by_in_reply_to || build_conversation
+    end
   end
 
   private
@@ -55,16 +62,22 @@ class Mailbox::ConversationFinderStrategies::NewConversationStrategy < Mailbox::
       inbox_id: @inbox.id,
       contact_id: @contact.id,
       contact_inbox_id: @contact_inbox.id,
-      additional_attributes: {
-        in_reply_to: in_reply_to,
-        source: 'email',
-        auto_reply: @processed_mail.auto_reply?,
-        mail_subject: sanitize_mailbox_value(@processed_mail.subject),
-        initiated_at: {
-          timestamp: Time.now.utc
-        }
-      }
+      additional_attributes: conversation_attributes
     )
+  end
+
+  def conversation_attributes
+    attributes = {
+      in_reply_to: in_reply_to,
+      source: 'email',
+      auto_reply: @processed_mail.auto_reply?,
+      mail_subject: sanitize_mailbox_value(@processed_mail.subject),
+      initiated_at: {
+        timestamp: Time.now.utc
+      }
+    }
+    attributes[Mailbox::OriginContext::SPLIT_FROM_KEY] = @split_from.id if @split_from.present?
+    attributes
   end
 
   def in_reply_to

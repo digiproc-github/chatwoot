@@ -200,7 +200,7 @@ RSpec.describe Imap::ImapMailbox do
     end
 
     context 'when a reply for existing email conversation' do
-      let(:prev_conversation) { create(:conversation, account: account, inbox: channel.inbox, assignee: agent) }
+      let(:prev_conversation) { create(:conversation, account: account, inbox: channel.inbox, contact: contact, assignee: agent) }
       let(:reply_mail) do
         create_inbound_email_from_mail(from: 'email@gmail.com', to: 'imap@gmail.com', subject: 'Hello!', in_reply_to: 'test-in-reply-to')
       end
@@ -265,6 +265,49 @@ RSpec.describe Imap::ImapMailbox do
       end
     end
 
+    context 'when someone who was not visible on the thread replies' do
+      let(:customer) { create(:contact, email: 'customer@example.com', account: inbox.account) }
+      let(:origin) { create(:conversation, account: inbox.account, inbox: inbox, contact: customer) }
+      let(:hidden_reply) do
+        create_inbound_email_from_mail(from: 'hidden@example.com', to: 'imap@gmail.com', subject: 'Re: Question',
+                                       in_reply_to: '<question@customer.example.com>', body: 'Reply from the BCC recipient')
+      end
+
+      before do
+        create(:message, conversation: origin, account: inbox.account, inbox: inbox, message_type: :incoming, sender: customer,
+                         content: 'Original question', source_id: 'question@customer.example.com',
+                         content_attributes: { email: { from: ['customer@example.com'], to: ['imap@gmail.com'], cc: ['visible@example.com'] } })
+      end
+
+      it 'moves the reply to a new conversation linked to the original one' do
+        expect { class_instance.process(hidden_reply.mail, channel) }.to change(Conversation, :count).by(1)
+
+        expect(origin.messages.incoming.count).to eq(1)
+        expect(conversation.contact.email).to eq('hidden@example.com')
+        expect(conversation.additional_attributes['split_from_conversation_id']).to eq(origin.id)
+        expect(conversation.messages.activity.pluck(:content)).to include("This conversation originated from conversation ##{origin.display_id}")
+        expect(conversation.messages.where(private: true).last.content).to include('Original question')
+        expect(conversation.messages.incoming.last.content).to include('Reply from the BCC recipient')
+      end
+
+      it 'keeps further replies from the same sender in their conversation' do
+        class_instance.process(hidden_reply.mail, channel)
+        second_reply = create_inbound_email_from_mail(from: 'hidden@example.com', to: 'imap@gmail.com', subject: 'Re: Question',
+                                                      in_reply_to: '<question@customer.example.com>', body: 'Second reply')
+
+        expect { class_instance.process(second_reply.mail, channel) }.not_to change(Conversation, :count)
+        expect(conversation.messages.incoming.count).to eq(2)
+      end
+
+      it 'keeps a reply from a CC recipient in the original conversation, attributed to them' do
+        cc_reply = create_inbound_email_from_mail(from: 'visible@example.com', to: 'imap@gmail.com', subject: 'Re: Question',
+                                                  in_reply_to: '<question@customer.example.com>', body: 'Reply from the CC recipient')
+
+        expect { class_instance.process(cc_reply.mail, channel) }.not_to change(Conversation, :count)
+        expect(origin.messages.incoming.last.sender.email).to eq('visible@example.com')
+      end
+    end
+
     context 'when a new conversation with nil in_reply_to' do
       let(:prev_conversation) { create(:conversation, account: account, inbox: channel.inbox, assignee: agent) }
       let(:reply_mail) do
@@ -321,7 +364,7 @@ RSpec.describe Imap::ImapMailbox do
           inbox: inbox,
           source_id: 'test-reference-id',
           account: account,
-          conversation: conversation
+          conversation: create(:conversation, account: account, inbox: inbox, contact: create(:contact, email: 'sony@chatwoot.com', account: account))
         )
         conversation = message.conversation
 
@@ -343,7 +386,7 @@ RSpec.describe Imap::ImapMailbox do
           inbox: inbox,
           source_id: 'test-reference-id-2',
           account: account,
-          conversation: conversation
+          conversation: create(:conversation, account: account, inbox: inbox, contact: create(:contact, email: 'sony@chatwoot.com', account: account))
         )
         conversation = message.conversation
 
@@ -368,7 +411,7 @@ RSpec.describe Imap::ImapMailbox do
     end
 
     context 'when a reply to a conversation started by an agent' do
-      let(:agent_conversation) { create(:conversation, account: account, inbox: channel.inbox, assignee: agent) }
+      let(:agent_conversation) { create(:conversation, account: account, inbox: channel.inbox, contact: contact, assignee: agent) }
       let(:reply_mail_with_fallback_reference) do
         # Simulate an email reply with a reference that matches FALLBACK_PATTERN
         reference_id = "account/#{account.id}/conversation/#{agent_conversation.uuid}@chatwoot.com"
@@ -392,7 +435,7 @@ RSpec.describe Imap::ImapMailbox do
     end
 
     context 'when references contain both message and fallback patterns' do
-      let(:agent_conversation) { create(:conversation, account: account, inbox: channel.inbox, assignee: agent) }
+      let(:agent_conversation) { create(:conversation, account: account, inbox: channel.inbox, contact: contact, assignee: agent) }
       let(:reply_mail_with_multiple_references) do
         # Multiple references including both patterns
         fallback_reference = "account/#{account.id}/conversation/#{agent_conversation.uuid}@chatwoot.com"
