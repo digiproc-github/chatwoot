@@ -3,6 +3,8 @@
 # Table name: account_users
 #
 #  id                       :bigint           not null, primary key
+#  accepts_calls            :boolean          default(TRUE), not null
+#  accepts_conversations    :boolean          default(TRUE), not null
 #  active_at                :datetime
 #  auto_offline             :boolean          default(TRUE), not null
 #  availability             :integer          default("online"), not null
@@ -31,16 +33,20 @@ class AccountUser < ApplicationRecord
   belongs_to :user
   belongs_to :inviter, class_name: 'User', optional: true
 
-  enum role: { agent: 0, administrator: 1 }
-  enum availability: { online: 0, offline: 1, busy: 2 }
+  enum :role, { agent: 0, administrator: 1 }
+  enum :availability, { online: 0, offline: 1, busy: 2 }
 
   accepts_nested_attributes_for :account
 
   after_create_commit :notify_creation, :create_notification_setting
   after_destroy :notify_deletion, :remove_user_from_account
+  after_destroy_commit :close_account_streams
   after_save :update_presence_in_redis, if: :saved_change_to_availability?
+  after_commit :invalidate_filtered_unread_count_visibility, on: [:create, :destroy]
+  after_update_commit :invalidate_filtered_unread_count_visibility_update, if: :filtered_unread_count_visibility_changed?
 
   validates :user_id, uniqueness: { scope: :account_id }
+  validate :accepts_conversations_or_calls
 
   def create_notification_setting
     setting = user.notification_settings.new(account_id: account.id)
@@ -76,8 +82,34 @@ class AccountUser < ApplicationRecord
     Rails.configuration.dispatcher.dispatch(AGENT_REMOVED, Time.zone.now, account: account)
   end
 
+  def close_account_streams
+    ActionCable.server.broadcast(RoomChannel.account_user_stream(account_id, user_id), { event: 'account_user.removed' })
+  end
+
   def update_presence_in_redis
     OnlineStatusTracker.set_status(account.id, user.id, availability)
+  end
+
+  def filtered_unread_count_visibility_changed?
+    previous_changes.key?('role') || previous_changes.key?('custom_role_id')
+  end
+
+  def invalidate_filtered_unread_count_visibility
+    ::Conversations::UnreadCounts::FilteredCountInvalidator.new(account).user_visibility_changed!(user_id: user_id)
+  end
+
+  def invalidate_filtered_unread_count_visibility_update
+    dispatch_account_cache_invalidated if invalidate_filtered_unread_count_visibility
+  end
+
+  def dispatch_account_cache_invalidated
+    Rails.configuration.dispatcher.dispatch(ACCOUNT_CACHE_INVALIDATED, Time.zone.now, account: account, cache_keys: account.cache_keys)
+  end
+
+  def accepts_conversations_or_calls
+    return if accepts_conversations || accepts_calls
+
+    errors.add(:base, I18n.t('errors.account_user.no_work_preference'))
   end
 end
 

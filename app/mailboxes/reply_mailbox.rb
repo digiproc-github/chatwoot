@@ -13,6 +13,7 @@ class ReplyMailbox < ApplicationMailbox
     ActiveRecord::Base.transaction do
       persist_conversation_if_needed
       decorate_mail
+      find_or_create_sender_contact
       create_message
       add_attachments_to_message
     end
@@ -33,9 +34,29 @@ class ReplyMailbox < ApplicationMailbox
 
     @conversation.save!
     Rails.logger.info "Created new conversation #{@conversation.id} for email #{mail.message_id}"
+    Mailbox::OriginContext.new(@conversation).perform if @conversation.additional_attributes[Mailbox::OriginContext::SPLIT_FROM_KEY].present?
   end
 
   def decorate_mail
     @processed_mail = MailPresenter.new(mail, @conversation.account)
+  end
+
+  # The message is attributed to whoever wrote the email, for example a CC recipient replying on the thread.
+  # Senders without a usable address fall back to the conversation contact (see MailboxSanitizer).
+  def find_or_create_sender_contact
+    return unless @conversation.inbox.email?
+    return unless Devise.email_regexp.match?(sender_email.to_s)
+
+    @inbox = @conversation.inbox
+    @contact = @inbox.contacts.from_email(sender_email)
+    create_contact if @contact.blank?
+  end
+
+  def sender_email
+    sanitize_mailbox_value(@processed_mail.original_sender)&.downcase
+  end
+
+  def identify_contact_name
+    sanitize_mailbox_value(@processed_mail.sender_name || sender_email.split('@').first)
   end
 end

@@ -9,6 +9,10 @@
     "OAUTH": {
       "GOOGLE_SIGNUP": "Inscrever-se com conta Google"
     },
+    "SHOPIFY": {
+      "TITLE": "Set up Chatwoot for your Shopify store",
+      "DESCRIPTION": "Create your account to continue to Shopify App Pricing and choose a plan."
+    },
     "COMPANY_NAME": {
       "LABEL": "Nome da empresa",
       "PLACEHOLDER": "Enter your company name. eg: Wayne Enterprises",
@@ -45,6 +49,13 @@
       "ERROR_MESSAGE": "Não foi possível conectar ao servidor Woot, por favor tente novamente mais tarde"
     },
     "SUBMIT": "Criar conta",
-    "HAVE_AN_ACCOUNT": "Já tem uma conta?"
+    "HAVE_AN_ACCOUNT": "Já tem uma conta?",
+    "VERIFY_EMAIL": {
+      "TITLE": "Check your inbox",
+      "DESCRIPTION": "We sent a verification link to {email}. Click the link to verify your email and get started.",
+      "RESEND": "Reenviar e-mail de verificação",
+      "RESEND_SUCCESS": "Verification email sent. Please check your inbox.",
+      "RESEND_ERROR": "Could not send verification email. Please try again."
+    }
   }
 }

@@ -129,5 +129,46 @@ RSpec.describe Mailbox::ConversationFinder do
         expect(Rails.logger).to have_received(:info).once.with('Conversation found via receiver_uuid_strategy strategy')
       end
     end
+
+    context 'when the sender was not visible on the matched conversation' do
+      let(:customer) { create(:contact, email: 'customer@example.com', account: account) }
+      let(:conversation) { create(:conversation, inbox: email_channel.inbox, account: account, contact: customer) }
+
+      before do
+        conversation.update!(uuid: '12345678-1234-1234-1234-123456789012')
+        create(:message, conversation: conversation, account: account, inbox: email_channel.inbox, message_type: :outgoing,
+                         content_attributes: { cc_emails: ['visible@example.com'], bcc_emails: ['hidden@example.com'] })
+        mail.to = 'reply+12345678-1234-1234-1234-123456789012@example.com'
+      end
+
+      it 'builds a new conversation for the sender in the same inbox' do
+        mail.from = 'hidden@example.com'
+        result = described_class.new(mail).find
+
+        expect(result).to be_new_record
+        expect(result.inbox).to eq(email_channel.inbox)
+        expect(result.contact.email).to eq('hidden@example.com')
+        expect(result.additional_attributes['split_from_conversation_id']).to eq(conversation.id)
+      end
+
+      it 'returns the conversation an earlier email from the sender was split into' do
+        mail.from = 'hidden@example.com'
+        hidden_contact = create(:contact, email: 'hidden@example.com', account: account)
+        split_conversation = create(:conversation, inbox: email_channel.inbox, account: account, contact: hidden_contact,
+                                                   additional_attributes: { split_from_conversation_id: conversation.id })
+
+        expect(described_class.new(mail).find).to eq(split_conversation)
+      end
+
+      it 'returns the matched conversation for a CC recipient' do
+        mail.from = 'visible@example.com'
+        expect(described_class.new(mail).find).to eq(conversation)
+      end
+
+      it 'returns the matched conversation for its contact' do
+        mail.from = 'Customer@Example.com'
+        expect(described_class.new(mail).find).to eq(conversation)
+      end
+    end
   end
 end

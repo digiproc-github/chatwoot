@@ -1,5 +1,6 @@
 class DashboardController < ActionController::Base
   include SwitchLocale
+  include PortalHomeData
 
   GLOBAL_CONFIG_KEYS = %w[
     LOGO
@@ -22,8 +23,12 @@ class DashboardController < ActionController::Base
     HCAPTCHA_SITE_KEY
     LOGOUT_REDIRECT_LINK
     DISABLE_USER_PROFILE_UPDATE
+    DISABLE_META_INBOX_CREATION
+    DISABLE_META_MESSAGE_SENDING
     DEPLOYMENT_ENV
     INSTALLATION_PRICING_PLAN
+    CAPTAIN_TOOLS_MANIFEST_ENABLED
+    CAPTAIN_TOOLS_CATALOG_URL
   ].freeze
 
   before_action :set_application_pack
@@ -63,6 +68,8 @@ class DashboardController < ActionController::Base
     return unless @portal
 
     @locale = @portal.default_locale
+    request.variant = :documentation if @portal.layout == 'documentation'
+    load_home_data
     render 'public/api/v1/portals/show', layout: 'portal', portal: @portal and return
   end
 
@@ -72,16 +79,31 @@ class DashboardController < ActionController::Base
       VAPID_PUBLIC_KEY: VapidService.public_key,
       ENABLE_ACCOUNT_SIGNUP: GlobalConfigService.load('ENABLE_ACCOUNT_SIGNUP', 'false'),
       FB_APP_ID: GlobalConfigService.load('FB_APP_ID', ''),
-      INSTAGRAM_APP_ID: GlobalConfigService.load('INSTAGRAM_APP_ID', ''),
+      INSTAGRAM_APP_ID: Instagram::LoginConfiguration.app_id,
       TIKTOK_APP_ID: GlobalConfigService.load('TIKTOK_APP_ID', ''),
       FACEBOOK_API_VERSION: GlobalConfigService.load('FACEBOOK_API_VERSION', 'v18.0'),
       WHATSAPP_APP_ID: GlobalConfigService.load('WHATSAPP_APP_ID', ''),
       WHATSAPP_CONFIGURATION_ID: GlobalConfigService.load('WHATSAPP_CONFIGURATION_ID', ''),
       IS_ENTERPRISE: ChatwootApp.enterprise?,
+      IS_COMPANY_ENRICHMENT_ENABLED: ChatwootApp.enterprise? && GlobalConfigService.load('CONTEXT_DEV_API_KEY', nil).present?,
       AZURE_APP_ID: GlobalConfigService.load('AZURE_APP_ID', ''),
       GIT_SHA: GIT_HASH,
-      ALLOWED_LOGIN_METHODS: allowed_login_methods
+      ALLOWED_LOGIN_METHODS: allowed_login_methods,
+      ACTIVE_PLATFORM_BANNERS: active_platform_banners,
+      ACTIVE_FEATURE_ANNOUNCEMENTS: active_feature_announcements
     }
+  end
+
+  def active_platform_banners
+    return [] unless ChatwootApp.chatwoot_cloud?
+
+    PlatformBanner.active.not_feature_announcement.order(created_at: :desc).as_json(only: %i[id banner_message banner_type updated_at])
+  end
+
+  def active_feature_announcements
+    return [] unless ChatwootApp.chatwoot_cloud?
+
+    PlatformBanner.active.feature_announcement.order(created_at: :desc).as_json(only: %i[id title banner_message video_url updated_at])
   end
 
   def allowed_login_methods

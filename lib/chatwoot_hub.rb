@@ -82,9 +82,10 @@ class ChatwootHub
     model.last&.id || 0
   end
 
-  def self.sync_with_hub
+  def self.sync_with_hub(refresh_billing: false)
     begin
       info = instance_config
+      info[:refresh_billing] = true if refresh_billing
       info = info.merge(instance_metrics) unless ENV['DISABLE_TELEMETRY']
       response = RestClient.post(ping_url, info.to_json, { content_type: :json, accept: :json })
       parsed_response = JSON.parse(response)
@@ -106,12 +107,16 @@ class ChatwootHub
   end
 
   def self.send_push(fcm_options)
-    info = { fcm_options: fcm_options }
-    RestClient.post(push_notification_url, info.merge(instance_config).to_json, { content_type: :json, accept: :json })
+    send_push_with_response(fcm_options)
   rescue *ExceptionList::REST_CLIENT_EXCEPTIONS => e
     Rails.logger.error "Exception: #{e.message}"
   rescue StandardError => e
     ChatwootExceptionTracker.new(e).capture_exception
+  end
+
+  def self.send_push_with_response(fcm_options)
+    info = { fcm_options: fcm_options }
+    RestClient.post(push_notification_url, info.merge(instance_config).to_json, { content_type: :json, accept: :json })
   end
 
   def self.emit_event(event_name, event_data)

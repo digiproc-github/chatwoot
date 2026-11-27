@@ -34,7 +34,7 @@
 #  index_messages_on_conversation_id                    (conversation_id)
 #  index_messages_on_created_at                         (created_at)
 #  index_messages_on_inbox_id                           (inbox_id)
-#  index_messages_on_sender_type_and_sender_id          (sender_type,sender_id)
+#  index_messages_on_sender_and_created                 (sender_type,sender_id,created_at)
 #  index_messages_on_source_id                          (source_id)
 #
 
@@ -44,6 +44,7 @@ class Message < ApplicationRecord
   include MessageFilterHelpers
   include Liquidable
   NUMBER_OF_PERMITTED_ATTACHMENTS = 15
+  BOT_SENDER_TYPES = %w[AgentBot Captain::Assistant].freeze
 
   TEMPLATE_PARAMS_SCHEMA = {
     'type': 'object',
@@ -55,6 +56,7 @@ class Message < ApplicationRecord
           'category': { 'type': 'string' },
           'language': { 'type': 'string' },
           'namespace': { 'type': 'string' },
+          'content_mode': { 'type': 'string', 'enum': %w[raw_template rendered] },
           'processed_params': { 'type': 'object' }
         },
         'required': %w[name]
@@ -84,8 +86,8 @@ class Message < ApplicationRecord
   # Transient flag used to skip waiting_since clearing for specific bot/system messages.
   attr_accessor :preserve_waiting_since
 
-  enum message_type: { incoming: 0, outgoing: 1, activity: 2, template: 3 }
-  enum content_type: {
+  enum :message_type, { incoming: 0, outgoing: 1, activity: 2, template: 3 }
+  enum :content_type, {
     text: 0,
     input_text: 1,
     input_textarea: 2,
@@ -100,7 +102,7 @@ class Message < ApplicationRecord
     sticker: 11,
     voice_call: 12
   }
-  enum status: { sent: 0, delivered: 1, read: 2, failed: 3 }
+  enum :status, { sent: 0, delivered: 1, read: 2, failed: 3 }
   # [:submitted_email, :items, :submitted_values] : Used for bot message types
   # [:email] : Used by conversation_continuity incoming email messages
   # [:in_reply_to] : Used to reply to a particular tweet in threads
@@ -110,7 +112,9 @@ class Message < ApplicationRecord
   # [:data] : Used for structured content types such as voice_call
   store :content_attributes, accessors: [:submitted_email, :items, :submitted_values, :email, :in_reply_to, :deleted,
                                          :external_created_at, :story_sender, :story_id, :external_error,
-                                         :translations, :in_reply_to_external_id, :is_unsupported, :data], coder: JSON
+                                         :translations, :translation_failed, :translation_provider, :source_language,
+                                         :in_reply_to_external_id,
+                                         :is_unsupported, :data], coder: JSON
 
   store :external_source_ids, accessors: [:slack], coder: JSON, prefix: :external_source_id
 
@@ -118,7 +122,11 @@ class Message < ApplicationRecord
   scope :chat, -> { where.not(message_type: :activity).where(private: false) }
   scope :non_activity_messages, -> { where.not(message_type: :activity).reorder('created_at desc') }
   scope :today, -> { where("date_trunc('day', created_at) = ?", Date.current) }
+  scope :not_forwarded, -> { where("(messages.content_attributes #>> '{}')::jsonb -> 'forwarded_message_id' IS NULL") }
   scope :voice_calls, -> { where(content_type: :voice_call) }
+  scope :without_missed_call_messages, lambda {
+    where(Arel::Nodes::InfixOperation.new('->>', arel_table[:additional_attributes], Arel::Nodes.build_quoted('missed_call_message')).eq(nil))
+  }
 
   # TODO: Get rid of default scope
   # https://stackoverflow.com/a/1834250/939299
@@ -170,13 +178,33 @@ class Message < ApplicationRecord
     data
   end
 
+  # The widget learns only that a contact sent the message, not the contact's stored details
+  def widget_sender_data
+    return { type: 'contact' } if sender.is_a?(Contact)
+
+    sender.push_event_data
+  end
+
+  # The widget renders the whole message and forwards it to the host page, so the payload stays whole
+  # and only a contact sender loses its stored details. Pass a built push_event_data to skip building it again.
+  def widget_push_event_data(data = push_event_data)
+    sender.is_a?(Contact) ? data.merge(sender: widget_sender_data) : data
+  end
+
+  def webhook_push_event_data
+    push_event_data.merge(
+      content: Messages::WebhookContentNormalizer.normalize(content),
+      processed_message_content: Messages::WebhookContentNormalizer.normalize(processed_message_content)
+    )
+  end
+
   def webhook_data
     data = {
       account: account.webhook_data,
       additional_attributes: additional_attributes,
       content_attributes: content_attributes,
       content_type: content_type,
-      content: outgoing_content,
+      content: webhook_content,
       conversation: conversation.webhook_data,
       created_at: created_at,
       id: id,
@@ -195,12 +223,21 @@ class Message < ApplicationRecord
     MessageContentPresenter.new(self).outgoing_content
   end
 
+  # Raw content with survey URL (no markdown rendering) for webhook consumers
+  def webhook_content
+    MessageContentPresenter.new(self).webhook_content
+  end
+
   def email_notifiable_message?
     return false if private?
     return false if %w[outgoing template].exclude?(message_type)
     return false if template? && %w[input_csat text].exclude?(content_type)
 
     true
+  end
+
+  def forwarded?
+    content_attributes['forwarded_message_id'].present?
   end
 
   def auto_reply_email?
@@ -213,8 +250,9 @@ class Message < ApplicationRecord
     return false unless human_response? && !private?
     return false if conversation.first_reply_created_at.present?
     return false if conversation.messages.outgoing
-                                .where.not(sender_type: ['AgentBot', 'Captain::Assistant'])
+                                .where.not(sender_type: BOT_SENDER_TYPES)
                                 .where.not(private: true)
+                                .not_forwarded
                                 .where("(additional_attributes->'campaign_id') is null").count > 1
 
     true
@@ -352,7 +390,9 @@ class Message < ApplicationRecord
     # if automation rule id is present, it's not a human response
     # if campaign id is present, it's not a human response
     # external echo messages are responses sent from the native app (WhatsApp Business, Instagram)
+    # forwarded emails go to a third party, not to the contact
     outgoing? &&
+      !forwarded? &&
       content_attributes['automation_rule_id'].blank? &&
       additional_attributes['campaign_id'].blank? &&
       (sender.is_a?(User) || content_attributes['external_echo'].present?)
@@ -360,7 +400,7 @@ class Message < ApplicationRecord
 
   def bot_response?
     # Check if this is a response from AgentBot or Captain::Assistant
-    outgoing? && sender_type.in?(['AgentBot', 'Captain::Assistant'])
+    outgoing? && sender_type.in?(BOT_SENDER_TYPES)
   end
 
   def dispatch_create_events
@@ -440,8 +480,11 @@ class Message < ApplicationRecord
   end
 
   def reindex_for_search
+    return unless respond_to?(:reindex)
+
     reindex(mode: :async)
   end
 end
 
 Message.prepend_mod_with('Message')
+Message.include_mod_with('Concerns::Message')

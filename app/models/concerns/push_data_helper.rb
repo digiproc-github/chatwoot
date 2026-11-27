@@ -9,7 +9,11 @@ module PushDataHelper
     Conversations::EventDataPresenter.new(self).lock_data
   end
 
+  def widget_push_event_data
+    Conversations::EventDataPresenter.new(self).widget_data
+  end
+
   def webhook_data
-    Conversations::EventDataPresenter.new(self).push_data
+    Conversations::EventDataPresenter.new(self).webhook_data
   end
 end

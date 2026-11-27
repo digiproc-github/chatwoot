@@ -12,21 +12,41 @@ class VoiceAPI extends ApiClient {
     return ContactsAPI.initiateCall(contactId, inboxId).then(r => r.data);
   }
 
-  leaveConference(inboxId, conversationId) {
+  leaveConference({ inboxId, conversationId, callSid }) {
     return axios
       .delete(`${this.baseUrl()}/inboxes/${inboxId}/conference`, {
-        params: { conversation_id: conversationId },
+        params: { conversation_id: conversationId, call_sid: callSid },
       })
       .then(r => r.data);
   }
 
-  joinConference({ conversationId, inboxId, callSid }) {
+  joinConference({ conversationId, inboxId, callSid, attemptId }) {
     return axios
       .post(`${this.baseUrl()}/inboxes/${inboxId}/conference`, {
         conversation_id: conversationId,
         call_sid: callSid,
+        attempt_id: attemptId,
       })
       .then(r => r.data);
+  }
+
+  // Stops the ring for this agent only; the caller keeps waiting for the others
+  dismissRing({ inboxId, conversationId, callSid }) {
+    return axios.post(
+      `${this.baseUrl()}/inboxes/${inboxId}/conference/dismiss`,
+      {
+        conversation_id: conversationId,
+        call_sid: callSid,
+      }
+    );
+  }
+
+  setHold({ inboxId, conversationId, callSid, hold }) {
+    return axios.patch(`${this.baseUrl()}/inboxes/${inboxId}/conference/hold`, {
+      conversation_id: conversationId,
+      call_sid: callSid,
+      hold,
+    });
   }
 
   getToken(inboxId) {

@@ -9,6 +9,10 @@
     "OAUTH": {
       "GOOGLE_SIGNUP": "Reģistrēties, izmantojot Google"
     },
+    "SHOPIFY": {
+      "TITLE": "Set up Chatwoot for your Shopify store",
+      "DESCRIPTION": "Create your account to continue to Shopify App Pricing and choose a plan."
+    },
     "COMPANY_NAME": {
       "LABEL": "Uzņēmuma nosaukums",
       "PLACEHOLDER": "Ievadiet sava uzņēmuma nosaukumu. Piemēram, Wayne Enterprises",
@@ -45,6 +49,13 @@
       "ERROR_MESSAGE": "Nevarēja izveidot savienojumu ar Woot serveri. Lūdzu mēģiniet vēlreiz."
     },
     "SUBMIT": "Izveidot kontu",
-    "HAVE_AN_ACCOUNT": "Jau ir konts?"
+    "HAVE_AN_ACCOUNT": "Jau ir konts?",
+    "VERIFY_EMAIL": {
+      "TITLE": "Check your inbox",
+      "DESCRIPTION": "We sent a verification link to {email}. Click the link to verify your email and get started.",
+      "RESEND": "Sūtīt verifikācijas e-pastu atkārtoti",
+      "RESEND_SUCCESS": "Verification email sent. Please check your inbox.",
+      "RESEND_ERROR": "Could not send verification email. Please try again."
+    }
   }
 }

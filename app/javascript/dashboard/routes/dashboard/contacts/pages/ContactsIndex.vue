@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n';
 import { useStore, useMapGetter } from 'dashboard/composables/store';
 import { useAlert } from 'dashboard/composables';
 import { debounce } from '@chatwoot/utils';
+import { useAbortableRequest } from 'dashboard/composables/useAbortableRequest';
 import { useUISettings } from 'dashboard/composables/useUISettings';
 import filterQueryGenerator from 'dashboard/helper/filterQueryGenerator';
 
@@ -16,7 +17,8 @@ import ContactsBulkActionBar from '../components/ContactsBulkActionBar.vue';
 import Dialog from 'dashboard/components-next/dialog/Dialog.vue';
 import BulkActionsAPI from 'dashboard/api/bulkActions';
 
-const DEFAULT_SORT_FIELD = 'last_activity_at';
+// Only order backed by index_contacts_on_account_id_and_last_activity_at
+const DEFAULT_SORT = '-last_activity_at';
 const DEBOUNCE_DELAY = 300;
 
 const store = useStore();
@@ -32,6 +34,12 @@ const customViewsUiFlags = useMapGetter('customViews/getUIFlags');
 const segments = useMapGetter('customViews/getContactCustomViews');
 const appliedFilters = useMapGetter('contacts/getAppliedContactFilters');
 const meta = useMapGetter('contacts/getMeta');
+const filterError = ref('');
+const {
+  run: runFilterRequest,
+  abort: abortFilterRequest,
+  isPending: isFiltering,
+} = useAbortableRequest();
 
 const searchQuery = computed(() => route.query?.search);
 const searchValue = ref(searchQuery.value || '');
@@ -41,10 +49,10 @@ const searchPageNumber = ref(1);
 const isLoadingMore = ref(false);
 
 const parseSortSettings = (sortString = '') => {
-  const hasDescending = sortString.startsWith('-');
-  const sortField = hasDescending ? sortString.slice(1) : sortString;
+  const sortValue = sortString || DEFAULT_SORT;
+  const hasDescending = sortValue.startsWith('-');
   return {
-    sort: sortField || DEFAULT_SORT_FIELD,
+    sort: hasDescending ? sortValue.slice(1) : sortValue,
     order: hasDescending ? '-' : '',
   };
 };
@@ -60,8 +68,11 @@ const sortState = reactive({
 
 const activeLabel = computed(() => route.params.label);
 const activeSegmentId = computed(() => route.params.segmentId);
-const isFetchingList = computed(
+const isFetchingContacts = computed(
   () => uiFlags.value.isFetching || customViewsUiFlags.value.isFetching
+);
+const isFetchingList = computed(
+  () => isFetchingContacts.value || isFiltering.value
 );
 const currentPage = computed(() => Number(meta.value?.currentPage));
 const totalItems = computed(() => meta.value?.count);
@@ -151,7 +162,13 @@ const openBulkDeleteDialog = () => {
 };
 
 const toggleSelectAll = shouldSelect => {
-  selectedContactIds.value = shouldSelect ? [...visibleContactIds.value] : [];
+  const currentSelection = new Set(selectedContactIds.value);
+  if (shouldSelect) {
+    visibleContactIds.value.forEach(id => currentSelection.add(id));
+  } else {
+    visibleContactIds.value.forEach(id => currentSelection.delete(id));
+  }
+  selectedContactIds.value = Array.from(currentSelection);
 };
 
 const toggleContactSelection = ({ id, value }) => {
@@ -190,25 +207,60 @@ const getCommonFetchParams = (page = 1) => ({
   label: activeLabel.value,
 });
 
-const fetchContacts = async (page = 1) => {
-  clearSelection();
+const resetFilterRequest = () => {
+  abortFilterRequest();
+  filterError.value = '';
+};
+
+const fetchContacts = async (page = 1, options = {}) => {
+  resetFilterRequest();
+  const { clearSelection: shouldClearSelection = true } = options;
+  if (shouldClearSelection) {
+    clearSelection();
+  }
   await store.dispatch('contacts/clearContactFilters');
   await store.dispatch('contacts/get', getCommonFetchParams(page));
   updatePageParam(page);
 };
 
-const fetchSavedOrAppliedFilteredContact = async (payload, page = 1) => {
+const fetchSavedOrAppliedFilteredContact = async (
+  payload,
+  page = 1,
+  options = {}
+) => {
   if (!activeSegmentId.value && !hasAppliedFilters.value) return;
-  clearSelection();
-  await store.dispatch('contacts/filter', {
-    ...getCommonFetchParams(page),
-    queryPayload: payload,
-  });
-  updatePageParam(page);
+
+  const { clearSelection: shouldClearSelection = true } = options;
+  if (shouldClearSelection) {
+    clearSelection();
+  }
+
+  filterError.value = '';
+  try {
+    const results = await runFilterRequest(signal =>
+      store.dispatch('contacts/filter', {
+        ...getCommonFetchParams(page),
+        queryPayload: payload,
+        signal,
+      })
+    );
+    if (results) updatePageParam(page);
+  } catch (error) {
+    clearSelection();
+    filterError.value =
+      activeSegmentId.value && error?.response?.status === 422
+        ? t('CONTACTS_LAYOUT.FILTER.INVALID_SEGMENT')
+        : t('CONTACTS_LAYOUT.FILTER.LOAD_ERROR');
+  }
 };
 
-const fetchActiveContacts = async (page = 1) => {
-  clearSelection();
+const fetchActiveContacts = async (page = 1, options = {}) => {
+  resetFilterRequest();
+  const { clearSelection: shouldClearSelection = true } = options;
+  if (shouldClearSelection) {
+    clearSelection();
+  }
+
   await store.dispatch('contacts/clearContactFilters');
   await store.dispatch('contacts/active', {
     page,
@@ -217,28 +269,37 @@ const fetchActiveContacts = async (page = 1) => {
   updatePageParam(page);
 };
 
-const searchContacts = debounce(async (value, page = 1, append = false) => {
-  if (!append) {
-    clearSelection();
-    searchPageNumber.value = 1;
-  }
-  await store.dispatch('contacts/clearContactFilters');
-  searchValue.value = value;
+const searchContacts = debounce(
+  async (value, page = 1, append = false, options = {}) => {
+    resetFilterRequest();
+    const { clearSelection: shouldClearSelection = true } = options;
 
-  if (!value) {
-    updatePageParam(page);
-    await fetchContacts(page);
-    return;
-  }
+    if (!append) {
+      searchPageNumber.value = 1;
 
-  updatePageParam(page, value);
-  await store.dispatch('contacts/search', {
-    ...getCommonFetchParams(page),
-    search: encodeURIComponent(value),
-    append,
-  });
-  searchPageNumber.value = page;
-}, DEBOUNCE_DELAY);
+      if (shouldClearSelection) {
+        clearSelection();
+      }
+    }
+    await store.dispatch('contacts/clearContactFilters');
+    searchValue.value = value;
+
+    if (!value) {
+      updatePageParam(page);
+      await fetchContacts(page, { clearSelection: false });
+      return;
+    }
+
+    updatePageParam(page, value);
+    await store.dispatch('contacts/search', {
+      ...getCommonFetchParams(page),
+      search: value,
+      append,
+    });
+    searchPageNumber.value = page;
+  },
+  DEBOUNCE_DELAY
+);
 
 const loadMoreSearchResults = async () => {
   if (!hasMore.value || isLoadingMore.value) return;
@@ -248,7 +309,7 @@ const loadMoreSearchResults = async () => {
 
   await store.dispatch('contacts/search', {
     ...getCommonFetchParams(nextPage),
-    search: encodeURIComponent(searchValue.value),
+    search: searchValue.value,
     append: true,
   });
 
@@ -256,19 +317,26 @@ const loadMoreSearchResults = async () => {
   isLoadingMore.value = false;
 };
 
-const fetchContactsBasedOnContext = async page => {
-  clearSelection();
+const fetchContactsBasedOnContext = async (page, options = {}) => {
+  const { clearSelection: shouldClearSelection = true } = options;
+  if (shouldClearSelection) {
+    clearSelection();
+  }
   updatePageParam(page, searchValue.value);
-  if (isFetchingList.value) return;
+  if (isFetchingContacts.value) return;
   if (searchQuery.value) {
-    await searchContacts(searchQuery.value, page);
+    await searchContacts(searchQuery.value, page, false, {
+      clearSelection: shouldClearSelection,
+    });
     return;
   }
   // Reset the search value when we change the view
   searchValue.value = '';
   // If we're on the active route, fetch active contacts
   if (isActiveView.value) {
-    await fetchActiveContacts(page);
+    await fetchActiveContacts(page, {
+      clearSelection: shouldClearSelection,
+    });
     return;
   }
   // If there are applied filters or active segment with query
@@ -278,12 +346,19 @@ const fetchContactsBasedOnContext = async page => {
   ) {
     const queryPayload =
       activeSegment.value?.query || filterQueryGenerator(appliedFilters.value);
-    await fetchSavedOrAppliedFilteredContact(queryPayload, page);
+    await fetchSavedOrAppliedFilteredContact(queryPayload, page, {
+      clearSelection: shouldClearSelection,
+    });
     return;
   }
   // Default case: fetch regular contacts + label
-  await fetchContacts(page);
+  await fetchContacts(page, {
+    clearSelection: shouldClearSelection,
+  });
 };
+
+const onPageChange = page =>
+  fetchContactsBasedOnContext(page, { clearSelection: false });
 
 const assignLabels = async labels => {
   if (!labels.length || !selectedContactIds.value.length) {
@@ -302,6 +377,28 @@ const assignLabels = async labels => {
     await fetchContactsBasedOnContext(pageNumber.value);
   } catch (error) {
     useAlert(t('CONTACTS_BULK_ACTIONS.ASSIGN_LABELS_FAILED'));
+  } finally {
+    isBulkActionLoading.value = false;
+  }
+};
+
+const removeLabels = async labels => {
+  if (!labels.length || !selectedContactIds.value.length) {
+    return;
+  }
+
+  isBulkActionLoading.value = true;
+  try {
+    await BulkActionsAPI.create({
+      type: 'Contact',
+      ids: selectedContactIds.value,
+      labels: { remove: labels },
+    });
+    useAlert(t('CONTACTS_BULK_ACTIONS.REMOVE_LABELS_SUCCESS'));
+    clearSelection();
+    await fetchContactsBasedOnContext(pageNumber.value);
+  } catch (error) {
+    useAlert(t('CONTACTS_BULK_ACTIONS.REMOVE_LABELS_FAILED'));
   } finally {
     isBulkActionLoading.value = false;
   }
@@ -338,7 +435,9 @@ const handleSort = async ({ sort, order }) => {
   });
 
   if (searchQuery.value) {
-    await searchContacts(searchValue.value);
+    await searchContacts(searchValue.value, pageNumber.value, false, {
+      clearSelection: false,
+    });
     return;
   }
 
@@ -359,17 +458,6 @@ const handleSort = async ({ sort, order }) => {
 const createContact = async contact => {
   await store.dispatch('contacts/create', contact);
 };
-
-watch(
-  contacts,
-  newContacts => {
-    const idsOnPage = newContacts.map(contact => contact.id);
-    selectedContactIds.value = selectedContactIds.value.filter(id =>
-      idsOnPage.includes(id)
-    );
-  },
-  { deep: true }
-);
 
 watch(hasSelection, value => {
   if (!value) {
@@ -416,7 +504,9 @@ watch(searchQuery, value => {
 onMounted(async () => {
   if (!activeSegmentId.value) {
     if (searchQuery.value) {
-      await searchContacts(searchQuery.value, pageNumber.value);
+      await searchContacts(searchQuery.value, pageNumber.value, false, {
+        clearSelection: false,
+      });
       return;
     }
     if (isActiveView.value) {
@@ -452,8 +542,10 @@ onMounted(async () => {
       :use-infinite-scroll="isSearchView"
       :has-more="hasMore"
       :is-loading-more="isLoadingMore"
-      @update:current-page="fetchContactsBasedOnContext"
-      @search="searchContacts"
+      @update:current-page="onPageChange"
+      @search="
+        value => searchContacts(value, 1, false, { clearSelection: false })
+      "
       @update:sort="handleSort"
       @apply-filter="fetchSavedOrAppliedFilteredContact"
       @clear-filters="fetchContacts"
@@ -466,6 +558,14 @@ onMounted(async () => {
         <Spinner />
       </div>
 
+      <p
+        v-else-if="filterError"
+        role="alert"
+        class="py-10 text-center text-base text-n-ruby-11"
+      >
+        {{ filterError }}
+      </p>
+
       <template v-else>
         <ContactsBulkActionBar
           v-if="hasSelection"
@@ -475,6 +575,7 @@ onMounted(async () => {
           @toggle-all="toggleSelectAll"
           @clear-selection="clearSelection"
           @assign-labels="assignLabels"
+          @remove-labels="removeLabels"
           @delete-selected="openBulkDeleteDialog"
         />
         <ContactEmptyState
@@ -485,6 +586,7 @@ onMounted(async () => {
           :button-label="t('CONTACTS_LAYOUT.EMPTY_STATE.BUTTON_LABEL')"
           @create="createContact"
         />
+
         <div
           v-else-if="showEmptyText"
           class="flex items-center justify-center py-10"
@@ -493,6 +595,7 @@ onMounted(async () => {
             {{ emptyStateMessage }}
           </span>
         </div>
+
         <div v-else class="flex flex-col gap-4 pt-4 pb-6">
           <ContactsList
             :contacts="contacts"

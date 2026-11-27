@@ -2,19 +2,23 @@ import {
   DuplicateContactException,
   ExceptionWithMessage,
 } from 'shared/helpers/CustomErrors';
-import types from '../../mutation-types';
-import ContactAPI from '../../../api/contacts';
 import snakecaseKeys from 'snakecase-keys';
 import AccountActionsAPI from '../../../api/accountActions';
+import ContactAPI from '../../../api/contacts';
 import AnalyticsHelper from '../../../helper/AnalyticsHelper';
 import { CONTACTS_EVENTS } from '../../../helper/AnalyticsHelper/events';
+import types from '../../mutation-types';
 
 const buildContactFormData = contactParams => {
   const formData = new FormData();
   const { additional_attributes = {}, ...contactProperties } = contactParams;
   Object.keys(contactProperties).forEach(key => {
-    if (contactProperties[key]) {
-      formData.append(key, contactProperties[key]);
+    const value = contactProperties[key];
+    const shouldAppendBlankCompanyId =
+      key === 'company_id' && value !== undefined;
+
+    if (value || shouldAppendBlankCompanyId) {
+      formData.append(key, value ?? '');
     }
   });
   const { social_profiles, ...additionalAttributesProperties } =
@@ -36,7 +40,11 @@ const buildContactFormData = contactParams => {
 
 export const handleContactOperationErrors = error => {
   if (error.response?.status === 422) {
-    throw new DuplicateContactException(error.response.data.attributes);
+    const exception = new DuplicateContactException(
+      error.response.data.attributes
+    );
+    exception.message = error.response.data.message || exception.message;
+    throw exception;
   } else if (error.response?.data?.message) {
     throw new ExceptionWithMessage(error.response.data.message);
   } else {
@@ -110,6 +118,19 @@ export const actions = {
     }
   },
 
+  fetchAttachments: async ({ commit }, id) => {
+    commit(types.SET_CONTACT_UI_FLAG, { isFetchingAttachments: true });
+    try {
+      const response = await ContactAPI.getAttachments(id);
+      commit(types.SET_CONTACT_ATTACHMENTS, {
+        id,
+        data: response.data.payload,
+      });
+    } finally {
+      commit(types.SET_CONTACT_UI_FLAG, { isFetchingAttachments: false });
+    }
+  },
+
   update: async ({ commit }, { id, isFormData = false, ...contactParams }) => {
     const { avatar, customAttributes, ...paramsToDecamelize } = contactParams;
     const decamelizedContactParams = {
@@ -152,35 +173,6 @@ export const actions = {
     } catch (error) {
       commit(types.SET_CONTACT_UI_FLAG, { isCreating: false });
       return handleContactOperationErrors(error);
-    }
-  },
-
-  import: async ({ commit }, file) => {
-    commit(types.SET_CONTACT_UI_FLAG, { isImporting: true });
-    try {
-      await ContactAPI.importContacts(file);
-      commit(types.SET_CONTACT_UI_FLAG, { isImporting: false });
-    } catch (error) {
-      commit(types.SET_CONTACT_UI_FLAG, { isImporting: false });
-      if (error.response?.data?.message) {
-        throw new ExceptionWithMessage(error.response.data.message);
-      }
-    }
-  },
-
-  export: async ({ commit }, { payload, label }) => {
-    commit(types.SET_CONTACT_UI_FLAG, { isExporting: true });
-    try {
-      await ContactAPI.exportContacts({ payload, label });
-
-      commit(types.SET_CONTACT_UI_FLAG, { isExporting: false });
-    } catch (error) {
-      commit(types.SET_CONTACT_UI_FLAG, { isExporting: false });
-      if (error.response?.data?.message) {
-        throw new Error(error.response.data.message);
-      } else {
-        throw new Error(error);
-      }
     }
   },
 
@@ -280,24 +272,32 @@ export const actions = {
 
   filter: async (
     { commit },
-    { page = 1, sortAttr, queryPayload, resetState = true } = {}
+    { page = 1, sortAttr, queryPayload, resetState = true, signal } = {}
   ) => {
-    commit(types.SET_CONTACT_UI_FLAG, { isFetching: true });
     try {
       const {
         data: { payload, meta },
-      } = await ContactAPI.filter(page, sortAttr, queryPayload);
+      } = await ContactAPI.filter(page, sortAttr, queryPayload, { signal });
+      if (signal?.aborted) return null;
+
       if (resetState) {
         commit(types.CLEAR_CONTACTS);
         commit(types.SET_CONTACTS, payload);
         commit(types.SET_CONTACT_META, meta);
-        commit(types.SET_CONTACT_UI_FLAG, { isFetching: false });
       }
       return payload;
     } catch (error) {
-      commit(types.SET_CONTACT_UI_FLAG, { isFetching: false });
+      if (signal?.aborted) return null;
+      if (!resetState) return [];
+
+      commit(types.CLEAR_CONTACTS);
+      commit(types.SET_CONTACT_META, {
+        count: 0,
+        current_page: page,
+        has_more: false,
+      });
+      throw error;
     }
-    return [];
   },
 
   setContactFilters({ commit }, data) {
@@ -308,10 +308,14 @@ export const actions = {
     commit(types.CLEAR_CONTACT_FILTERS);
   },
 
-  initiateCall: async ({ commit }, { contactId, inboxId }) => {
+  initiateCall: async ({ commit }, { contactId, inboxId, conversationId }) => {
     commit(types.SET_CONTACT_UI_FLAG, { isInitiatingCall: true });
     try {
-      const response = await ContactAPI.initiateCall(contactId, inboxId);
+      const response = await ContactAPI.initiateCall(
+        contactId,
+        inboxId,
+        conversationId
+      );
       commit(types.SET_CONTACT_UI_FLAG, { isInitiatingCall: false });
       return response.data;
     } catch (error) {

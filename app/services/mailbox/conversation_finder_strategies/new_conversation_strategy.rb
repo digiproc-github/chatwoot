@@ -4,9 +4,12 @@ class Mailbox::ConversationFinderStrategies::NewConversationStrategy < Mailbox::
 
   attr_accessor :processed_mail, :account, :inbox, :contact, :contact_inbox, :conversation, :channel
 
-  def initialize(mail)
+  # split_from: a conversation the sender was not visible on (see Mailbox::ConversationFinder).
+  # The new conversation goes to that conversation's inbox, because a reply to its reply+uuid address names no inbox address.
+  def initialize(mail, split_from: nil)
     super(mail)
-    @channel = EmailChannelFinder.new(mail).perform
+    @split_from = split_from
+    @channel = split_from.present? ? split_from.inbox.channel : EmailChannelFinder.new(mail).perform
     return unless @channel
 
     @account = @channel.account
@@ -24,13 +27,13 @@ class Mailbox::ConversationFinderStrategies::NewConversationStrategy < Mailbox::
     return nil unless @channel # No valid channel found
     return nil unless incoming_email_from_valid_email? # Skip edge cases
 
-    # Check if conversation already exists by in_reply_to
-    existing_conversation = find_conversation_by_in_reply_to
-    return existing_conversation if existing_conversation
-
-    # Prepare contact (persisted) and build conversation (not persisted)
+    # Prepare contact (persisted), reuse the sender's conversation for the thread or build one (not persisted)
     find_or_create_contact
-    build_conversation
+    if @split_from.present?
+      Mailbox::OriginContext.split_conversation_for(@contact, @split_from) || build_conversation
+    else
+      find_conversation_by_in_reply_to || build_conversation
+    end
   end
 
   private
@@ -45,11 +48,11 @@ class Mailbox::ConversationFinderStrategies::NewConversationStrategy < Mailbox::
   end
 
   def original_sender_email
-    @processed_mail.original_sender&.downcase
+    sanitize_mailbox_value(@processed_mail.original_sender)&.downcase
   end
 
   def identify_contact_name
-    @processed_mail.sender_name || @processed_mail.from.first.split('@').first
+    sanitize_mailbox_value(@processed_mail.sender_name || @processed_mail.from.first.split('@').first)
   end
 
   def build_conversation
@@ -59,25 +62,32 @@ class Mailbox::ConversationFinderStrategies::NewConversationStrategy < Mailbox::
       inbox_id: @inbox.id,
       contact_id: @contact.id,
       contact_inbox_id: @contact_inbox.id,
-      additional_attributes: {
-        in_reply_to: in_reply_to,
-        source: 'email',
-        auto_reply: @processed_mail.auto_reply?,
-        mail_subject: @processed_mail.subject,
-        initiated_at: {
-          timestamp: Time.now.utc
-        }
-      }
+      additional_attributes: conversation_attributes
     )
   end
 
-  def in_reply_to
-    mail['In-Reply-To'].try(:value)
+  def conversation_attributes
+    attributes = {
+      in_reply_to: in_reply_to,
+      source: 'email',
+      auto_reply: @processed_mail.auto_reply?,
+      mail_subject: sanitize_mailbox_value(@processed_mail.subject),
+      initiated_at: {
+        timestamp: Time.now.utc
+      }
+    }
+    attributes[Mailbox::OriginContext::SPLIT_FROM_KEY] = @split_from.id if @split_from.present?
+    attributes
   end
 
+  def in_reply_to
+    sanitize_mailbox_value(mail['In-Reply-To'].try(:value))
+  end
+
+  # Scoped to the sender so replies from different recipients of the same forward stay separate
   def find_conversation_by_in_reply_to
     return if in_reply_to.blank?
 
-    @account.conversations.where("additional_attributes->>'in_reply_to' = ?", in_reply_to).first
+    @contact.conversations.where("additional_attributes->>'in_reply_to' = ?", in_reply_to).first
   end
 end

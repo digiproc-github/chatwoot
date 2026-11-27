@@ -112,3 +112,7 @@ bin/start-worker.sh
 initial-plan.md
 chatwoot-deployment-reference.md
 chatwoot-frontend/
+.nodeterm/project.json
+
+# Cache that `rake ruby_llm:refresh_models` writes next to the model registry
+config/llm_models.json.published.json

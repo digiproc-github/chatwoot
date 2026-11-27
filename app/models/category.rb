@@ -73,6 +73,13 @@ class Category < ApplicationRecord
     params[:page] || 1
   end
 
+  def translation_family
+    root_id = associated_category_id || id
+    categories = portal.categories
+
+    categories.where(id: root_id).or(categories.where(associated_category_id: root_id))
+  end
+
   def self.update_positions(portal:, positions_hash:)
     return if positions_hash.blank?
 
@@ -92,7 +99,7 @@ class Category < ApplicationRecord
   def allowed_locales
     return if portal.blank?
 
-    allowed_locales = portal.config['allowed_locales']
+    allowed_locales = portal.allowed_locale_codes
 
     return true if allowed_locales.include?(locale)
 

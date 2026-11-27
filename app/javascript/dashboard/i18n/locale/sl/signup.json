@@ -9,6 +9,10 @@
     "OAUTH": {
       "GOOGLE_SIGNUP": "Prijavite se z Googlom"
     },
+    "SHOPIFY": {
+      "TITLE": "Set up Chatwoot for your Shopify store",
+      "DESCRIPTION": "Create your account to continue to Shopify App Pricing and choose a plan."
+    },
     "COMPANY_NAME": {
       "LABEL": "Ime podjetja",
       "PLACEHOLDER": "Vnesite ime vašega podjetja. Npr. Wayne Enterprises",
@@ -45,6 +49,13 @@
       "ERROR_MESSAGE": "Ni bilo mogoče vzpostaviti povezave s strežnikom. Prosimo poskusite ponovno."
     },
     "SUBMIT": "Ustvari račun",
-    "HAVE_AN_ACCOUNT": "Že imate račun?"
+    "HAVE_AN_ACCOUNT": "Že imate račun?",
+    "VERIFY_EMAIL": {
+      "TITLE": "Check your inbox",
+      "DESCRIPTION": "We sent a verification link to {email}. Click the link to verify your email and get started.",
+      "RESEND": "Ponovno pošlji potrditveni e-poštni naslov",
+      "RESEND_SUCCESS": "Verification email sent. Please check your inbox.",
+      "RESEND_ERROR": "Could not send verification email. Please try again."
+    }
   }
 }

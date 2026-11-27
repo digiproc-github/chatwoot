@@ -4,6 +4,7 @@
 #
 #  id                             :bigint           not null, primary key
 #  account_sid                    :string           not null
+#  api_key_secret                 :string
 #  api_key_sid                    :string
 #  auth_token                     :string           not null
 #  content_templates              :jsonb
@@ -11,6 +12,9 @@
 #  medium                         :integer          default("sms")
 #  messaging_service_sid          :string
 #  phone_number                   :string
+#  provider_config                :jsonb
+#  twiml_app_sid                  :string
+#  voice_enabled                  :boolean          default(FALSE), not null
 #  created_at                     :datetime         not null
 #  updated_at                     :datetime         not null
 #  account_id                     :integer          not null
@@ -45,10 +49,25 @@ class Channel::TwilioSms < ApplicationRecord
   validates :phone_number, absence: true, if: :messaging_service_sid?
   validates :phone_number, uniqueness: true, allow_nil: true
 
-  enum medium: { sms: 0, whatsapp: 1 }
+  enum :medium, { sms: 0, whatsapp: 1 }
 
   def name
     medium == 'sms' ? 'Twilio SMS' : 'Whatsapp'
+  end
+
+  # Mutes only the incoming side of calling; default on, so only an explicit false disables inbound.
+  def inbound_calls_enabled?
+    provider_config['inbound_calls_enabled'] != false
+  end
+
+  def webhook_signature_enforced?(endpoint)
+    provider_config["#{endpoint}_signature_enforced"] == true
+  end
+
+  def enforce_webhook_signature!(endpoint)
+    with_lock do
+      update_columns(provider_config: provider_config.merge("#{endpoint}_signature_enforced" => true)) # rubocop:disable Rails/SkipsModelValidations
+    end
   end
 
   def send_message(to:, body:, media_url: nil)
@@ -58,8 +77,6 @@ class Channel::TwilioSms < ApplicationRecord
     client.messages.create(**params)
   end
 
-  private
-
   def client
     if api_key_sid.present?
       Twilio::REST::Client.new(api_key_sid, auth_token, account_sid)
@@ -67,6 +84,12 @@ class Channel::TwilioSms < ApplicationRecord
       Twilio::REST::Client.new(account_sid, auth_token)
     end
   end
+
+  def basic_auth_credentials
+    api_key_sid.present? ? [api_key_sid, auth_token] : [account_sid, auth_token]
+  end
+
+  private
 
   def send_message_from
     if messaging_service_sid?
@@ -76,3 +99,5 @@ class Channel::TwilioSms < ApplicationRecord
     end
   end
 end
+
+Channel::TwilioSms.prepend_mod_with('Channel::TwilioSms')

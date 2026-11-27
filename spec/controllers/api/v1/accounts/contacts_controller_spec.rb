@@ -6,8 +6,8 @@ RSpec.describe 'Contacts API', type: :request do
     {
       attribute_key: 'email',
       filter_operator: 'contains',
-      values: 'looped',
-      query_operator: 'and',
+      values: ['looped'],
+      query_operator: nil,
       attribute_model: 'standard',
       custom_attribute_type: ''
     }
@@ -101,7 +101,7 @@ RSpec.describe 'Contacts API', type: :request do
       end
 
       it 'returns all contacts with company name desc order' do
-        get "/api/v1/accounts/#{account.id}/contacts?include_contact_inboxes=false&sort=-company",
+        get "/api/v1/accounts/#{account.id}/contacts?include_contact_inboxes=false&sort=-company_name",
             headers: admin.create_new_auth_token,
             as: :json
 
@@ -112,15 +112,15 @@ RSpec.describe 'Contacts API', type: :request do
       end
 
       it 'returns all contacts with company name asc order with null values at last' do
-        get "/api/v1/accounts/#{account.id}/contacts?include_contact_inboxes=false&sort=-company",
+        contact_3
+        get "/api/v1/accounts/#{account.id}/contacts?include_contact_inboxes=false&sort=-company_name",
             headers: admin.create_new_auth_token,
             as: :json
 
         expect(response).to have_http_status(:success)
         response_body = response.parsed_body
-        expect(response_body['payload'].first['email']).to eq(contact_1.email)
-        expect(response_body['payload'].first['id']).to eq(contact_1.id)
-        expect(response_body['payload'].last['email']).to eq(contact_4.email)
+        expect(response_body['payload'].first(2).pluck('id')).to contain_exactly(contact.id, contact_1.id)
+        expect(response_body['payload'].last(2).pluck('id')).to contain_exactly(contact_3.id, contact_4.id)
       end
 
       it 'returns all contacts with country name desc order with null values at last' do
@@ -241,7 +241,7 @@ RSpec.describe 'Contacts API', type: :request do
       let(:admin) { create(:user, account: account, role: :administrator) }
 
       it 'enqueues a contact export job' do
-        expect(Account::ContactsExportJob).to receive(:perform_later).with(account.id, admin.id, nil, { :payload => nil, :label => nil }).once
+        expect(DataExports::ContactsJob).to receive(:perform_later).with(instance_of(DataExport), kind_of(String)).once
 
         post "/api/v1/accounts/#{account.id}/contacts/export",
              headers: admin.create_new_auth_token
@@ -250,28 +250,25 @@ RSpec.describe 'Contacts API', type: :request do
       end
 
       it 'enqueues a contact export job with sent_columns' do
-        expect(Account::ContactsExportJob).to receive(:perform_later).with(account.id, admin.id, %w[phone_number email],
-                                                                           { :payload => nil, :label => nil }).once
+        expect(DataExports::ContactsJob).to receive(:perform_later).with(instance_of(DataExport), kind_of(String)).once
 
         post "/api/v1/accounts/#{account.id}/contacts/export",
              headers: admin.create_new_auth_token,
              params: { column_names: %w[phone_number email] }
 
         expect(response).to have_http_status(:success)
+        expect(account.data_exports.last.export_options['column_names']).to eq(%w[phone_number email])
       end
 
       it 'enqueues a contact export job with payload' do
-        expect(Account::ContactsExportJob).to receive(:perform_later).with(account.id, admin.id, nil,
-                                                                           {
-                                                                             :payload => [ActionController::Parameters.new(email_filter).permit!],
-                                                                             :label => nil
-                                                                           }).once
+        expect(DataExports::ContactsJob).to receive(:perform_later).with(instance_of(DataExport), kind_of(String)).once
 
         post "/api/v1/accounts/#{account.id}/contacts/export",
              headers: admin.create_new_auth_token,
              params: { payload: [email_filter] }
 
         expect(response).to have_http_status(:success)
+        expect(account.data_exports.last.export_options['payload']).to eq([email_filter.stringify_keys])
       end
     end
   end
@@ -464,6 +461,21 @@ RSpec.describe 'Contacts API', type: :request do
         expect(response.body).to include('Invalid operator. The allowed operators for country_code are [equal_to,not_equal_to]')
       end
 
+      %w[contains does_not_contain].each do |operator|
+        it "rejects #{operator} for a numeric custom attribute" do
+          create(:custom_attribute_definition, account: account, attribute_model: :contact_attribute,
+                                               attribute_display_type: :number, attribute_key: 'contract_count')
+
+          post "/api/v1/accounts/#{account.id}/contacts/filter",
+               params: { payload: [{ attribute_key: 'contract_count', filter_operator: operator, values: ['12'] }] },
+               headers: admin.create_new_auth_token,
+               as: :json
+
+          expect(response).to have_http_status(:unprocessable_entity)
+          expect(response.parsed_body['error']).to start_with('Invalid operator. The allowed operators for contract_count are')
+        end
+      end
+
       it 'returns error the query value is invalid' do
         post "/api/v1/accounts/#{account.id}/contacts/filter",
              params: { payload: [
@@ -572,6 +584,13 @@ RSpec.describe 'Contacts API', type: :request do
         # custom attributes are updated
         json_response = response.parsed_body
         expect(json_response['payload']['contact']['custom_attributes']).to eq({ 'test' => 'test', 'test1' => 'test1' })
+      end
+
+      it 'creates the contact as a lead' do
+        post "/api/v1/accounts/#{account.id}/contacts", headers: admin.create_new_auth_token,
+                                                        params: valid_params
+
+        expect(account.contacts.last).to be_lead
       end
 
       it 'does not create the contact' do

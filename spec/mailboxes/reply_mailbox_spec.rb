@@ -52,6 +52,7 @@ RSpec.describe ReplyMailbox do
           assignee: agent,
           inbox: email_channel.inbox,
           account: account,
+          contact: create(:contact, email: 'sony@chatwoot.com', account: account),
           additional_attributes: { mail_subject: "Discussion: Let's debate these attachments" }
         )
       end
@@ -64,6 +65,142 @@ RSpec.describe ReplyMailbox do
       it 'find channel with in-reply-to mail' do
         described_subject
         expect(conversation_1.messages.last.content).to include("Let's talk about these images:")
+      end
+    end
+
+    context 'when the mail replies to a forwarded email' do
+      let(:email_channel) { create(:channel_email, email: 'test@example.com', account: account) }
+      let(:conversation) { create(:conversation, assignee: agent, inbox: email_channel.inbox, account: account) }
+      let(:supplier_reply) do
+        create_inbound_email_from_mail(from: 'supplier@example.com', to: email_channel.email, subject: 'Re: Fwd: Hello',
+                                       in_reply_to: '<forward/1@example.com>', body: 'Reply from the supplier')
+      end
+
+      before do
+        create(:message, conversation: conversation, account: account, message_type: :outgoing, source_id: 'forward/1@example.com',
+                         content_attributes: { forwarded_message_id: 1, to_emails: ['supplier@example.com'] })
+      end
+
+      it 'starts a new conversation with the forward recipient instead of using the original conversation' do
+        expect { described_class.receive supplier_reply }.to change(account.conversations, :count).by(1)
+
+        expect(conversation.messages.incoming).to be_empty
+        expect(account.conversations.last.contact.email).to eq('supplier@example.com')
+        expect(account.conversations.last.messages.last.content).to include('Reply from the supplier')
+      end
+
+      it 'keeps replies from different forward recipients in separate conversations' do
+        described_class.receive supplier_reply
+        vendor_reply = create_inbound_email_from_mail(from: 'vendor@example.com', to: email_channel.email, subject: 'Re: Fwd: Hello',
+                                                      in_reply_to: '<forward/1@example.com>', body: 'Reply from the vendor')
+
+        expect { described_class.receive vendor_reply }.to change(account.conversations, :count).by(1)
+
+        expect(account.conversations.last.contact.email).to eq('vendor@example.com')
+        expect(account.conversations.find_by(contact: Contact.from_email('supplier@example.com')).messages.count).to eq(1)
+      end
+    end
+
+    context 'when someone who was not visible on the thread replies' do
+      let(:email_channel) { create(:channel_email, email: 'test@example.com', account: account) }
+      let(:customer) { create(:contact, email: 'customer@example.com', account: account) }
+      let(:origin) { create(:conversation, assignee: agent, inbox: email_channel.inbox, account: account, contact: customer) }
+      let(:reply_address) { "reply+#{origin.uuid}@example.com" }
+
+      before do
+        create(:message, conversation: origin, account: account, inbox: email_channel.inbox, message_type: :incoming, sender: customer,
+                         content: 'Original question', source_id: 'question@customer.example.com',
+                         content_attributes: { email: { from: ['customer@example.com'], to: ['test@example.com'] } })
+        create(:message, conversation: origin, account: account, inbox: email_channel.inbox, message_type: :outgoing, sender: agent,
+                         content: 'Agent answer', content_attributes: { cc_emails: ['visible@example.com'], bcc_emails: ['hidden@example.com'] })
+      end
+
+      it 'moves a reply from an agent BCC recipient to a new conversation linked to the original one' do
+        hidden_reply = create_inbound_email_from_mail(from: 'hidden@example.com', to: reply_address, subject: 'Re: Question',
+                                                      body: 'Reply from the BCC recipient')
+
+        expect { described_class.receive hidden_reply }.to change(account.conversations, :count).by(1)
+
+        split_conversation = account.conversations.last
+        expect(origin.messages.incoming.count).to eq(1)
+        expect(split_conversation.contact.email).to eq('hidden@example.com')
+        expect(split_conversation.additional_attributes['split_from_conversation_id']).to eq(origin.id)
+        expect(split_conversation.messages.activity.pluck(:content))
+          .to include("This conversation originated from conversation ##{origin.display_id}")
+        expect(split_conversation.messages.where(private: true).last.content).to include('Original question')
+        expect(split_conversation.messages.incoming.last.sender.email).to eq('hidden@example.com')
+      end
+
+      it 'moves a reply-all from a customer BCC recipient to a new conversation' do
+        colleague_reply = create_inbound_email_from_mail(from: 'colleague@example.com', to: 'test@example.com', cc: 'customer@example.com',
+                                                         subject: 'Re: Question', in_reply_to: '<question@customer.example.com>',
+                                                         body: 'Reply from the colleague')
+
+        expect { described_class.receive colleague_reply }.to change(account.conversations, :count).by(1)
+
+        expect(origin.messages.incoming.count).to eq(1)
+        expect(account.conversations.last.contact.email).to eq('colleague@example.com')
+      end
+
+      it 'keeps further replies from the same sender in their split conversation' do
+        described_class.receive create_inbound_email_from_mail(from: 'hidden@example.com', to: reply_address, subject: 'Re: Question',
+                                                               body: 'First reply')
+        second_reply = create_inbound_email_from_mail(from: 'hidden@example.com', to: reply_address, subject: 'Re: Question',
+                                                      body: 'Second reply')
+
+        expect { described_class.receive second_reply }.not_to change(account.conversations, :count)
+        expect(account.conversations.last.messages.incoming.count).to eq(2)
+      end
+
+      it 'keeps a reply from a CC recipient in the original conversation, attributed to them' do
+        cc_reply = create_inbound_email_from_mail(from: 'visible@example.com', to: reply_address, subject: 'Re: Question',
+                                                  body: 'Reply from the CC recipient')
+
+        expect { described_class.receive cc_reply }.not_to change(account.conversations, :count)
+        expect(origin.messages.incoming.last.content).to include('Reply from the CC recipient')
+        expect(origin.messages.incoming.last.sender.email).to eq('visible@example.com')
+      end
+
+      it 'keeps a reply from the contact in the original conversation' do
+        customer_reply = create_inbound_email_from_mail(from: 'customer@example.com', to: reply_address, subject: 'Re: Question',
+                                                        body: 'Reply from the customer')
+
+        expect { described_class.receive customer_reply }.not_to change(account.conversations, :count)
+        expect(origin.messages.incoming.last.sender).to eq(customer)
+      end
+    end
+
+    context 'when new conversation email contains null bytes' do
+      let(:email_channel) { create(:channel_email, email: 'test@example.com', account: account) }
+      let(:null_byte_mail) { create_inbound_email_from_mail(from: 'sender@example.com', to: email_channel.email, subject: 'Hello') }
+      let(:mail_with_null_bytes) do
+        Mail.new.tap do |mail|
+          mail.from = 'sender@example.com'
+          mail.to = email_channel.email
+          mail.subject = "Hello\u0000"
+          mail.message_id = "message\u0000@example.com"
+          mail['In-Reply-To'] = "source\u0000@example.com"
+          mail.references = ["reference\u0000@example.com"]
+          mail.content_type = 'text/plain'
+          mail.body = "Body\u0000 text"
+        end
+      end
+
+      before do
+        allow(null_byte_mail).to receive(:mail).and_return(mail_with_null_bytes)
+      end
+
+      it 'creates sanitized conversation and message records' do
+        expect { described_class.receive null_byte_mail }.to change(Conversation, :count).by(1)
+
+        conversation = Conversation.last
+        message = conversation.messages.last
+
+        expect(conversation.additional_attributes['in_reply_to']).to eq('source@example.com')
+        expect(conversation.additional_attributes['mail_subject']).to eq('Hello')
+        expect(message.source_id).to eq('message@example.com')
+        expect(message.content).to eq('Body text')
+        expect(message.content_attributes.to_json).not_to include('\u0000')
       end
     end
 
@@ -148,6 +285,7 @@ RSpec.describe ReplyMailbox do
           assignee: agent,
           inbox: email_channel.inbox,
           account: account,
+          contact: create(:contact, email: 'reply+someidmfdvkjdnkjciwyreowuero83@chatwoot.com', account: account),
           additional_attributes: { mail_subject: "Discussion: Let's debate these attachments" }
         )
       end
@@ -176,6 +314,7 @@ RSpec.describe ReplyMailbox do
           assignee: agent,
           inbox: email_channel.inbox,
           account: account,
+          contact: create(:contact, email: 'sony@chatwoot.com', account: account),
           additional_attributes: { mail_subject: "Discussion: Let's debate these attachments" }
         )
       end
@@ -258,6 +397,7 @@ RSpec.describe ReplyMailbox do
           assignee: agent,
           inbox: email_channel.inbox,
           account: account,
+          contact: create(:contact, email: 'sony@chatwoot.com', account: account),
           additional_attributes: { mail_subject: "Discussion: Let's debate these attachments" }
         )
       end
